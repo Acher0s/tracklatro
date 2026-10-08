@@ -160,13 +160,11 @@ export class Bot {
     const mmr = p?.mmr ?? info?.mmr ?? undefined
     const meta =
       rank !== undefined && mmr !== undefined
-        ? ` (#${rank} · ${Math.round(mmr)})`
+        ? `#${rank} · ${Math.round(mmr)}`
         : mmr !== undefined
-          ? ` (${Math.round(mmr)})`
-          : ''
-    // Brackets in a name would break the masked link.
-    const safe = escapeMarkdown(this.#name(id).replace(/[[\]]/g, ''))
-    return `[**${safe}**](<${this.#cfg.siteUrl}/players/${id}>)${meta}`
+          ? `${Math.round(mmr)}`
+          : undefined
+    return playerLabel(this.#name(id), `${this.#cfg.siteUrl}/players/${id}`, meta)
   }
 
   /**
@@ -544,6 +542,25 @@ export class Bot {
     const status = r.ended_at === null ? 'playing' : r.winner_id ? `#${r.match_id}` : 'no result'
     return `• ${vs} · ${status} · ${ts(r.started_at)}`
   }
+}
+
+/**
+ * Characters Discord won't accept in masked-link text (the link then shows as
+ * raw markdown): emoji, flags, and invisible formatting characters such as
+ * zero-width joiners, variation selectors and bidi controls.
+ */
+const UNLINKABLE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Cf}︀-️]/u
+
+/**
+ * "**bacon** (#1 · 1624)" with the name linking to the profile. If the name
+ * can't be link text, it stays plain and the link moves onto the meta part
+ * (or a ↗ when there is none), so every player still gets a working link.
+ */
+export function playerLabel(name: string, url: string, meta?: string): string {
+  // Brackets in a name would break the masked link.
+  const safe = escapeMarkdown(name.replace(/[[\]]/g, ''))
+  if (!UNLINKABLE.test(name)) return `[**${safe}**](<${url}>)${meta ? ` (${meta})` : ''}`
+  return `**${safe}** [${meta ? `(${meta})` : '↗'}](<${url}>)`
 }
 
 /** Discord's message length limit. */
