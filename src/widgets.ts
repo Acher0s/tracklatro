@@ -58,19 +58,59 @@ export function queueWidget(
   }
 }
 
-export function rolesWidget(streakChannelId: string | undefined, minStreak: number): WidgetContent {
-  return {
-    title: '🔔 Notification roles',
-    description: [
-      'Click a button to toggle a role.',
-      '',
-      `🔥 **Win-streak alerts**: get pinged ${streakChannelId ? `in <#${streakChannelId}> ` : ''}when someone on a ${minStreak}+ win streak queues.`,
-    ].join('\n'),
-    footer: 'Click again to remove the role',
+export type RoleAlerts = {
+  streak?: { channelId?: string; minStreak: number }
+  tilt?: { channelId?: string; minLosses: number }
+}
+
+export function rolesWidget(alerts: RoleAlerts): WidgetContent {
+  const where = (channelId?: string) => (channelId ? `in <#${channelId}> ` : '')
+  const lines = ['Click a button to toggle a role.', '']
+  if (alerts.streak) {
+    lines.push(
+      `🔥 **Win-streak alerts**: get pinged ${where(alerts.streak.channelId)}when someone on a ${alerts.streak.minStreak}+ win streak queues.`
+    )
   }
+  if (alerts.tilt) {
+    lines.push(
+      `😤 **Tilt-queue alerts**: get pinged ${where(alerts.tilt.channelId)}when someone who lost ${alerts.tilt.minLosses}+ in a row queues right back up.`
+    )
+  }
+  return { title: '🔔 Notification roles', description: lines.join('\n'), footer: 'Click again to remove the role' }
 }
 
 /** Win-streak ping text. */
 export function streakAlert(label: string, streak: number, roleId: string): string {
   return `🔥 ${label} is on a **${streak}-win streak** and just queued! <@&${roleId}>`
+}
+
+/** Tilt-queue ping text. */
+export function tiltAlert(label: string, losses: number, roleId: string): string {
+  return `😤 ${label} lost **${losses} in a row** and is queuing right back up! <@&${roleId}>`
+}
+
+/** A game we saw finish: when the player queued for it, when it ended, and whether they won. */
+export type RecentGame = { queuedAt: number; endedAt: number; won: boolean }
+
+/**
+ * Length of the tilt chain behind a queue at `queuedAt`: consecutive losses,
+ * newest first, where each one was followed by a quick requeue (within
+ * `windowMs` of it ending), for the next loss and finally for this queue.
+ * Tilt-queuing when it's ≥ the minimum number of losses.
+ *
+ * Games we didn't see can't sneak into a chain: a whole game doesn't fit in a
+ * "quick" gap. A requeue can look like it started slightly *before* we noticed
+ * the previous game end (both between two polls), hence the bit of slack.
+ */
+export function tiltChain(games: readonly RecentGame[], queuedAt: number, windowMs: number, slackMs = 60_000): number {
+  let next = queuedAt
+  let losses = 0
+  for (let i = games.length - 1; i >= 0; i--) {
+    const game = games[i]!
+    const quick = next >= game.endedAt - slackMs && next - game.endedAt <= windowMs
+    if (game.won || !quick) break
+    losses++
+    next = game.queuedAt
+  }
+  return losses
 }

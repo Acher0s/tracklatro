@@ -21,7 +21,17 @@ import {
 import type { Store } from './db.ts'
 import type { Predictor } from './predict.ts'
 import type { Tracker } from './tracker.ts'
-import { matchesWidget, queueWidget, rolesWidget, streakAlert, type WidgetContent } from './widgets.ts'
+import type { MatchOutcome, TrackedMatch } from './tracker.ts'
+import {
+  matchesWidget,
+  queueWidget,
+  type RoleAlerts,
+  rolesWidget,
+  streakAlert,
+  tiltAlert,
+  tiltChain,
+  type WidgetContent,
+} from './widgets.ts'
 
 const S = {
   matchesChannel: 'matches_channel',
@@ -34,10 +44,20 @@ const S = {
   streakRole: 'streak_role',
   streakChannel: 'streak_channel',
   streakMin: 'streak_min',
+  tiltRole: 'tilt_role',
+  tiltChannel: 'tilt_channel',
+  tiltMin: 'tilt_min',
+  tiltWindow: 'tilt_window_minutes',
 } as const
 
-const STREAK_ROLE_BUTTON = 'tracklatro:role:streak'
+/** Role picker buttons → the setting holding their role. */
+const ROLE_BUTTONS: Record<string, string> = {
+  'tracklatro:role:streak': S.streakRole,
+  'tracklatro:role:tilt': S.tiltRole,
+}
 const DEFAULT_STREAK_MIN = 5
+const DEFAULT_TILT_MIN = 2
+const DEFAULT_TILT_WINDOW_MINUTES = 10
 /** Widgets are edited at most this often, and only when their content changed. */
 const WIDGET_MIN_INTERVAL_MS = 10_000
 /** Totals in widget footers (one site request) may be this old. */
@@ -77,9 +97,30 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
   .addSubcommand((s) =>
     s
       .setName('roles')
-      .setDescription('A role picker (win-streak alerts)')
+      .setDescription('A role picker for alert roles (give at least one role)')
       .addChannelOption(channelOption('Channel for the role picker'))
-      .addRoleOption((o) => o.setName('streak_role').setDescription('Role for win-streak alerts').setRequired(true))
+      .addRoleOption((o) => o.setName('streak_role').setDescription('Role for win-streak alerts'))
+      .addRoleOption((o) => o.setName('tilt_role').setDescription('Role for tilt-queue alerts'))
+  )
+  .addSubcommand((s) =>
+    s
+      .setName('tilt')
+      .setDescription('Ping the tilt-queue role when someone on a losing streak queues right back up')
+      .addChannelOption(channelOption('Channel for the pings'))
+      .addIntegerOption((o) =>
+        o
+          .setName('min_losses')
+          .setDescription(`Losses in a row (default ${DEFAULT_TILT_MIN})`)
+          .setMinValue(2)
+          .setMaxValue(20)
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('window_minutes')
+          .setDescription(`Max minutes between a loss and the next queue (default ${DEFAULT_TILT_WINDOW_MINUTES})`)
+          .setMinValue(1)
+          .setMaxValue(60)
+      )
   )
   .addSubcommand((s) =>
     s
@@ -108,7 +149,8 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
             { name: 'Queue widget', value: 'queue' },
             { name: 'Results channel', value: 'results' },
             { name: 'Role picker', value: 'roles' },
-            { name: 'Win-streak pings', value: 'streak' }
+            { name: 'Win-streak pings', value: 'streak' },
+            { name: 'Tilt-queue pings', value: 'tilt' }
           )
       )
   )
@@ -120,7 +162,7 @@ type WidgetKind = 'matches' | 'queue'
  * Per-server channels on top of the DMs and the live feed:
  *  - self-updating "ongoing matches" and "in queue" widgets
  *  - a results channel (finished matches with their results)
- *  - a role picker (win-streak alerts) and win-streak pings
+ *  - a role picker, plus role pings for win streaks and tilt queues
  * Configured with /setup and stored in the database.
  */
 export class ServerFeatures {
@@ -132,8 +174,8 @@ export class ServerFeatures {
   readonly #named: (ids: Iterable<string>) => Promise<void>
   /** Last rendered widget content, to only edit on change. */
   readonly #lastRender = new Map<WidgetKind, string>()
-  /** Streak each player was last pinged for: one ping per streak, not per requeue. */
-  readonly #pingedStreak = new Map<string, number>()
+  /** Streak each player was last pinged for, per alert: one ping per streak, not per requeue. */
+  readonly #pinged = new Map<string, number>()
   #flushTimer: NodeJS.Timeout | undefined
   #lastFlush = 0
   #flushing = false
@@ -155,6 +197,7 @@ export class ServerFeatures {
     for (const e of ['queue_join', 'queue_leave', 'match_start', 'match_end', 'round'] as const) {
       this.#tracker.on(e, () => this.#markDirty())
     }
+    this.#tracker.on('match_result', (m, outcome) => void this.#onMatchResult(m, outcome))
   }
 
   /** On login: bring the widgets up to date (re-posting any that were deleted). */
@@ -255,48 +298,87 @@ export class ServerFeatures {
     if (channel) await channel.send({ content, allowedMentions: { parse: [] } }).catch((err) => warn('results post', err))
   }
 
-  // ------------------------------------------------------------ streak pings
+  // -------------------------------------------------------------- role pings
 
-  async onQueueJoin(playerId: string) {
-    const roleId = this.#store.getSetting(S.streakRole)
-    const channel = await this.#channel(this.#store.getSetting(S.streakChannel))
-    if (!roleId || !channel) return
-    const min = Number(this.#store.getSetting(S.streakMin) ?? DEFAULT_STREAK_MIN)
+  async onQueueJoin(playerId: string, since: number) {
     const streak = this.#tracker.players.get(playerId)?.streak ?? 0
-    if (streak < min || this.#pingedStreak.get(playerId) === streak) return
-    this.#pingedStreak.set(playerId, streak)
+    if (streak >= this.#streakMin()) await this.#ping('streak', playerId, streak, streak)
+    // The losing result(s) may already be in: check right away.
+    await this.#checkTilt(playerId, since)
+  }
+
+  /**
+   * A requeue straight after a loss is usually seen together with the match
+   * end, before the result is known; once it is, check whether that made it a
+   * tilt queue.
+   */
+  async #onMatchResult(m: TrackedMatch, outcome: MatchOutcome) {
+    if (outcome.status !== 'found') return
+    const loser = outcome.result.won ? m.players[1] : m.players[0]
+    const snapshot = this.#tracker.players.get(loser)?.snapshot
+    if (snapshot?.kind === 'queuing') await this.#checkTilt(loser, snapshot.since)
+  }
+
+  async #checkTilt(playerId: string, queuedAt: number) {
+    const games = this.#tracker.players.get(playerId)?.recentGames ?? []
+    const losses = tiltChain(games, queuedAt, this.#tiltWindowMs())
+    // Keyed by the last loss, so one losing chain pings once.
+    if (losses >= this.#tiltMin()) await this.#ping('tilt', playerId, games.at(-1)!.endedAt, losses)
+  }
+
+  /** Pings an alert role about a player, once per `dedupe` value (a streak, a loss). */
+  async #ping(kind: 'streak' | 'tilt', playerId: string, dedupe: number, count: number) {
+    const roleId = this.#store.getSetting(kind === 'streak' ? S.streakRole : S.tiltRole)
+    const channel = await this.#channel(this.#store.getSetting(kind === 'streak' ? S.streakChannel : S.tiltChannel))
+    const key = `${kind}:${playerId}`
+    if (!roleId || !channel || this.#pinged.get(key) === dedupe) return
+    this.#pinged.set(key, dedupe)
     await this.#named([playerId])
-    await channel
-      .send({ content: streakAlert(this.#label(playerId), streak, roleId), allowedMentions: { roles: [roleId] } })
-      .catch((err) => warn('streak ping', err))
+    const label = this.#label(playerId)
+    const content = kind === 'streak' ? streakAlert(label, count, roleId) : tiltAlert(label, count, roleId)
+    await channel.send({ content, allowedMentions: { roles: [roleId] } }).catch((err) => warn(`${kind} ping`, err))
+  }
+
+  #streakMin(): number {
+    return Number(this.#store.getSetting(S.streakMin) ?? DEFAULT_STREAK_MIN)
+  }
+
+  #tiltMin(): number {
+    return Number(this.#store.getSetting(S.tiltMin) ?? DEFAULT_TILT_MIN)
+  }
+
+  #tiltWindowMs(): number {
+    return Number(this.#store.getSetting(S.tiltWindow) ?? DEFAULT_TILT_WINDOW_MINUTES) * 60_000
   }
 
   // -------------------------------------------------------------- role picker
 
   async #postRolesWidget() {
-    const content = rolesWidget(
-      this.#store.getSetting(S.streakChannel),
-      Number(this.#store.getSetting(S.streakMin) ?? DEFAULT_STREAK_MIN)
-    )
+    const alerts: RoleAlerts = {}
+    const buttons: ButtonBuilder[] = []
+    if (this.#store.getSetting(S.streakRole)) {
+      alerts.streak = { channelId: this.#store.getSetting(S.streakChannel), minStreak: this.#streakMin() }
+      buttons.push(roleButton('tracklatro:role:streak', 'Win-streak alerts', '🔥'))
+    }
+    if (this.#store.getSetting(S.tiltRole)) {
+      alerts.tilt = { channelId: this.#store.getSetting(S.tiltChannel), minLosses: this.#tiltMin() }
+      buttons.push(roleButton('tracklatro:role:tilt', 'Tilt-queue alerts', '😤'))
+    }
+    const content = rolesWidget(alerts)
     const embed = new EmbedBuilder()
       .setTitle(content.title)
       .setDescription(content.description)
       .setFooter({ text: content.footer })
       .setColor(0xe67e22)
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(STREAK_ROLE_BUTTON)
-        .setLabel('Win-streak alerts')
-        .setEmoji('🔥')
-        .setStyle(ButtonStyle.Secondary)
-    )
-    await this.#upsert(S.rolesChannel, S.rolesMessage, { embeds: [embed], components: [row] })
+    const components = buttons.length ? [new ActionRowBuilder<ButtonBuilder>().addComponents(buttons)] : []
+    await this.#upsert(S.rolesChannel, S.rolesMessage, { embeds: [embed], components })
   }
 
   /** Returns true if this was one of our buttons. */
   async handleButton(i: ButtonInteraction): Promise<boolean> {
-    if (i.customId !== STREAK_ROLE_BUTTON) return false
-    const roleId = this.#store.getSetting(S.streakRole)
+    const setting = ROLE_BUTTONS[i.customId]
+    if (!setting) return false
+    const roleId = this.#store.getSetting(setting)
     if (!i.inCachedGuild() || !roleId) {
       await i.reply({ content: 'This role picker is no longer set up.', flags: MessageFlags.Ephemeral })
       return true
@@ -306,7 +388,7 @@ export class ServerFeatures {
       if (has) await i.member.roles.remove(roleId, 'tracklatro role picker')
       else await i.member.roles.add(roleId, 'tracklatro role picker')
       await i.reply({
-        content: has ? `Removed <@&${roleId}>.` : `Added <@&${roleId}>. You'll be pinged for win streaks.`,
+        content: has ? `Removed <@&${roleId}>.` : `Added <@&${roleId}>. Click again to remove it.`,
         flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       })
@@ -329,14 +411,15 @@ export class ServerFeatures {
 
     if (sub === 'show') {
       const ch = (key: string) => (this.#store.getSetting(key) ? `<#${this.#store.getSetting(key)}>` : '—')
-      const role = this.#store.getSetting(S.streakRole)
+      const role = (key: string) => (this.#store.getSetting(key) ? `<@&${this.#store.getSetting(key)}>` : '—')
       return reply(
         [
           `**Ongoing matches widget:** ${ch(S.matchesChannel)}`,
           `**Queue widget:** ${ch(S.queueChannel)}`,
           `**Results:** ${ch(S.resultsChannel)}`,
-          `**Role picker:** ${ch(S.rolesChannel)} · role ${role ? `<@&${role}>` : '—'}`,
-          `**Win-streak pings:** ${ch(S.streakChannel)} · min ${this.#store.getSetting(S.streakMin) ?? DEFAULT_STREAK_MIN}`,
+          `**Role picker:** ${ch(S.rolesChannel)}`,
+          `**Win-streak pings:** ${ch(S.streakChannel)} · ${role(S.streakRole)} · ${this.#streakMin()}+ wins`,
+          `**Tilt-queue pings:** ${ch(S.tiltChannel)} · ${role(S.tiltRole)} · ${this.#tiltMin()}+ losses, requeued within ${this.#tiltWindowMs() / 60_000} min`,
         ].join('\n')
       )
     }
@@ -352,8 +435,8 @@ export class ServerFeatures {
       } else if (feature === 'roles') {
         await this.#deleteMessage(S.rolesChannel, S.rolesMessage)
         this.#store.deleteSetting(S.rolesChannel)
-      } else if (feature === 'streak') {
-        this.#store.deleteSetting(S.streakChannel)
+      } else if (feature === 'streak' || feature === 'tilt') {
+        this.#store.deleteSetting(feature === 'streak' ? S.streakChannel : S.tiltChannel)
         await this.#refreshRolesWidget()
       }
       return reply(`Turned off: **${feature}**.`)
@@ -379,26 +462,45 @@ export class ServerFeatures {
     }
 
     if (sub === 'roles') {
-      const role = i.options.getRole('streak_role', true)
-      const problem = roleProblem(role, i.guild.members.me!)
-      if (problem) return reply(problem)
+      // Roles not given keep their current setting, so either can be added later.
+      const streakRole = i.options.getRole('streak_role')
+      const tiltRole = i.options.getRole('tilt_role')
+      if (!streakRole && !tiltRole && !this.#store.getSetting(S.streakRole) && !this.#store.getSetting(S.tiltRole)) {
+        return reply('Give at least one role: `streak_role` and/or `tilt_role`.')
+      }
+      for (const role of [streakRole, tiltRole]) {
+        const problem = role && roleProblem(role, i.guild.members.me!)
+        if (problem) return reply(problem)
+      }
       await this.#deleteMessage(S.rolesChannel, S.rolesMessage)
       this.#store.setSetting(S.rolesChannel, channel.id)
-      this.#store.setSetting(S.streakRole, role.id)
+      if (streakRole) this.#store.setSetting(S.streakRole, streakRole.id)
+      if (tiltRole) this.#store.setSetting(S.tiltRole, tiltRole.id)
       await this.#postRolesWidget()
-      return reply(`Role picker posted in ${channel} for ${role}.`)
+      return reply(`Role picker posted in ${channel}.`)
     }
 
-    if (sub === 'streak') {
-      const role = this.#store.getSetting(S.streakRole)
-      if (!role) return reply('Set up the role first: `/setup roles`.')
-      this.#store.setSetting(S.streakChannel, channel.id)
-      this.#store.setSetting(S.streakMin, String(i.options.getInteger('min_streak') ?? DEFAULT_STREAK_MIN))
+    if (sub === 'streak' || sub === 'tilt') {
+      const role = this.#store.getSetting(sub === 'streak' ? S.streakRole : S.tiltRole)
+      if (!role) return reply(`Set up the role first: \`/setup roles ${sub}_role:…\`.`)
+      let what: string
+      if (sub === 'streak') {
+        this.#store.setSetting(S.streakChannel, channel.id)
+        this.#store.setSetting(S.streakMin, String(i.options.getInteger('min_streak') ?? DEFAULT_STREAK_MIN))
+        what = `someone on a ${this.#streakMin()}+ win streak queues`
+      } else {
+        this.#store.setSetting(S.tiltChannel, channel.id)
+        this.#store.setSetting(S.tiltMin, String(i.options.getInteger('min_losses') ?? DEFAULT_TILT_MIN))
+        this.#store.setSetting(S.tiltWindow, String(i.options.getInteger('window_minutes') ?? DEFAULT_TILT_WINDOW_MINUTES))
+        what = `someone loses ${this.#tiltMin()}+ games back to back and keeps requeuing (each time within ${this.#tiltWindowMs() / 60_000} min)`
+      }
       await this.#refreshRolesWidget()
       const mentionable = i.guild.roles.cache.get(role)?.mentionable
       return reply(
-        `<@&${role}> will be pinged in ${channel} when someone on a ${this.#store.getSetting(S.streakMin)}+ win streak queues.` +
-          (mentionable ? '' : '\n⚠️ That role isn\'t mentionable: turn on **Allow anyone to @mention this role** (or give me **Mention Everyone**), or the pings won\'t notify anyone.')
+        `<@&${role}> will be pinged in ${channel} when ${what}.` +
+          (mentionable
+            ? ''
+            : "\n⚠️ That role isn't mentionable: turn on **Allow anyone to @mention this role** (or give me **Mention Everyone**), or the pings won't notify anyone.")
       )
     }
   }
@@ -406,6 +508,10 @@ export class ServerFeatures {
   async #refreshRolesWidget() {
     if (this.#store.getSetting(S.rolesChannel)) await this.#postRolesWidget().catch((err) => warn('roles widget', err))
   }
+}
+
+function roleButton(customId: string, label: string, emoji: string): ButtonBuilder {
+  return new ButtonBuilder().setCustomId(customId).setLabel(label).setEmoji(emoji).setStyle(ButtonStyle.Secondary)
 }
 
 function channelKey(kind: WidgetKind): string {

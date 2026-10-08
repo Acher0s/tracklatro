@@ -285,7 +285,7 @@ export class Bot {
 
   async #onQueueJoin(playerId: string, since: number) {
     void this.#queuePosts.joined(playerId)
-    void this.#server.onQueueJoin(playerId)
+    void this.#server.onQueueJoin(playerId, since)
     await this.#named([playerId], 5_000)
     const msg = `${QUEUE_STAGE_EMOJI.queuing} ${this.#label(playerId)} queued ${ts(since)}.`
     const recipients = this.#recipients([playerId], (mask) => (mask & Notify.queue) !== 0)

@@ -54,16 +54,23 @@ DMs and the live feed, and saved in the database:
 | `/setup matches #channel` | A self-updating list of ongoing matches |
 | `/setup queue #channel` | A self-updating list of players in queue |
 | `/setup results #channel` | Finished matches with their results (cancelled ones aren't posted) |
-| `/setup roles #channel @role` | A role picker with a 🔥 **Win-streak alerts** button that toggles `@role` |
-| `/setup streak #channel [min_streak]` | Pings that role when someone on a 5+ (or `min_streak`) win streak queues |
+| `/setup roles #channel [streak_role] [tilt_role]` | A role picker with a button per alert role (🔥 **Win-streak alerts**, 😤 **Tilt-queue alerts**) |
+| `/setup streak #channel [min_streak]` | Pings the streak role when someone on a 5+ (or `min_streak`) win streak queues |
+| `/setup tilt #channel [min_losses] [window_minutes]` | Pings the tilt role when someone loses 2+ games back to back, requeuing within 10 min each time |
 | `/setup disable <feature>` · `/setup show` | Turn a feature off · see what's set up |
 
 - **Widgets** are one message each, edited in place when their content changes (at most every 10 s).
   Times are Discord timestamps, so they tick on their own. If a widget message is deleted, it's posted
   again. Footers show the queue's overall totals from `playerState.getActiveMatches`, refreshed at most
   once a minute.
-- **Win streaks** come from the leaderboard and are updated with every result the bot sees. Each streak
-  pings once: requeuing after a cancel doesn't ping again, a longer streak does.
+- **Streaks** come from the leaderboard (positive = wins in a row, negative = losses in a row, like the
+  queue bot) and are updated with every result the bot sees. Each streak pings once: requeuing after a
+  cancel doesn't ping again, a longer streak does.
+- **Tilt queues:** `min_losses`+ losses in a row where every step was quick: they requeued within
+  `window_minutes` of each loss, into the next loss and then into this queue. It's built from the
+  games the bot saw, so a game it missed can't sneak in (a whole game doesn't fit in a quick gap). A
+  requeue is often seen before the losing result is known, so the bot checks again when that result
+  comes in. Each losing chain pings once.
 - **The role** must be below the bot's own role, and **mentionable** (or give the bot **Mention
   Everyone**) for pings to notify people. `/setup` warns about both.
 - Like the feed, results and widgets cover the tracked players: the top `TOP_N` plus anyone followed.

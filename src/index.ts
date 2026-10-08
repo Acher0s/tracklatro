@@ -30,7 +30,9 @@ const tracker = new Tracker({
     Boolean(config.feedChannelId) ||
     store.hasAnySubscriptions() ||
     // Anything set up with /setup needs live data too.
-    ['matches_channel', 'queue_channel', 'results_channel', 'streak_channel'].some((key) => store.getSetting(key)),
+    ['matches_channel', 'queue_channel', 'results_channel', 'streak_channel', 'tilt_channel'].some((key) =>
+      store.getSetting(key)
+    ),
   history: (id) => results.history(id),
   matchTimeoutMs,
   wasEnded: (a, b, startTime) => store.matchEnded(a, b, startTime),

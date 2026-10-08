@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { type Api, HttpError, type LeaderboardEntry, MAX_BATCH_SIZE } from './api.ts'
 import type { Config } from './config.ts'
 import { findResult, type MatchRecord } from './results.ts'
+import type { RecentGame } from './widgets.ts'
 import { normalize, type Snapshot, transitions } from './state.ts'
 
 export type Tier = 'hot' | 'warm' | 'cold'
@@ -14,8 +15,13 @@ export type Player = {
   /** Leaderboard rank of a player outside the tracked scope (display only). */
   globalRank?: number
   mmr?: number
-  /** Current win streak (from the leaderboard, kept up to date with results we see). */
+  /**
+   * Current streak: positive = wins in a row, negative = losses in a row
+   * (from the leaderboard, kept up to date with results we see).
+   */
   streak?: number
+  /** Their last few games we saw finish with a result, oldest first (for tilt detection). */
+  recentGames?: RecentGame[]
   /** wins + losses at the last leaderboard refresh; deltas mark activity. */
   games?: number
   lastActiveAt?: number
@@ -100,6 +106,8 @@ export function adaptiveMatchTimeout(durationsMs: number[], fallbackMs: number, 
   return Math.min(maxMs, Math.max(MIN_MS, p99 * 1.25))
 }
 const MAX_BACKOFF_MS = 5 * 60_000
+/** Games kept per player in Player.recentGames. */
+const RECENT_GAMES = 10
 
 /**
  * Polls player states in tiers and turns state changes into match-level events.
@@ -429,15 +437,27 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   }
 
   /**
-   * Keeps win streaks current between leaderboard refreshes (which overwrite
-   * these with the real values): the winner's streak grows, the loser's resets.
+   * Keeps streaks current between leaderboard refreshes (which overwrite these
+   * with the real values). Mirrors the queue bot: positive = wins in a row,
+   * negative = losses in a row, and a result in the other direction restarts
+   * at ±1.
    */
   #applyToStreaks(m: TrackedMatch, result: MatchRecord) {
     const [winner, loser] = result.won ? m.players : [m.players[1], m.players[0]]
     const w = this.players.get(winner)
     const l = this.players.get(loser)
-    if (w?.streak !== undefined) w.streak = Math.max(0, w.streak) + 1
-    if (l?.streak !== undefined) l.streak = 0
+    if (w?.streak !== undefined) w.streak = w.streak > 0 ? w.streak + 1 : 1
+    if (l?.streak !== undefined) l.streak = l.streak < 0 ? l.streak - 1 : -1
+    for (const [p, won] of [
+      [w, true],
+      [l, false],
+    ] as const) {
+      if (!p) continue
+      const games = (p.recentGames ??= [])
+      // When they queued for it if we saw that, else when it started.
+      games.push({ queuedAt: m.queueJoins.get(p.id) ?? m.startTime, endedAt: m.endedAt ?? Date.now(), won })
+      if (games.length > RECENT_GAMES) games.shift()
+    }
   }
 
   /** Marks a match as already over without any events, so the site showing it as running is ignored. */

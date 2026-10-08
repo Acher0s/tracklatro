@@ -164,6 +164,19 @@ test('after a restart, a stuck match that was already settled is ignored', async
   assert.equal(tracker.activeMatches.size, 0)
 })
 
+test('results update streaks like the queue bot: wins count up, losses count down', async (t) => {
+  const { tracker, run } = setup(t, () => [record('b')]) // a beats b
+  tracker.observe(states({ a: inGame('b'), b: inGame('a') }), T0 + 60_000)
+  tracker.players.get('a')!.streak = -2
+  tracker.players.get('b')!.streak = -1
+  tracker.observe(states({ a: null, b: queuing(T0 + 400_000) }), T0 + 400_000)
+  await run(0)
+  assert.equal(tracker.players.get('a')?.streak, 1) // losing streak broken
+  assert.equal(tracker.players.get('b')?.streak, -2) // second loss in a row
+  assert.deepEqual(tracker.players.get('b')?.recentGames, [{ queuedAt: T0, endedAt: T0 + 400_000, won: false }])
+  assert.equal(tracker.players.get('a')?.recentGames?.[0]?.won, true)
+})
+
 test('adaptiveMatchTimeout learns from completed match durations', () => {
   const min = 60_000
   assert.equal(adaptiveMatchTimeout([20 * min], 90 * min, 180 * min), 90 * min) // too few samples
