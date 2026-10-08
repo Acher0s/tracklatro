@@ -21,13 +21,14 @@ npm start
 ```
 
 Set `DISCORD_GUILD_ID` while developing so slash commands register instantly in that one server.
-Set `FEED_CHANNEL_ID` for a public channel feed of queues, matches, and results for the top players.
+Set `FEED_CHANNEL_ID` for a public channel feed of queue joins and leaves, matches, and results for
+the top players.
 
 ## Commands
 
 | Command | |
 | --- | --- |
-| `/subscribe player [notify]` | DM me when they **queue**, find a **match**, or get a **result** (default: everything) |
+| `/subscribe player [notify]` | DM me when they **queue** (join or leave), find a **match**, or get a **result** (default: everything) |
 | `/unsubscribe player [notify]` | Stop all or some notifications |
 | `/subscriptions` | Who you follow and what they're doing right now |
 | `/status player` | Current state and recent tracked matches |

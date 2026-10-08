@@ -26,7 +26,7 @@ const ts = (ms: number, style: 'R' | 't' | 'f' = 'R') => `<t:${Math.floor(ms / 1
 
 const NOTIFY_CHOICES = [
   { name: 'Everything (queue, match found, result)', value: 'all' },
-  { name: 'Joins the queue', value: 'queue' },
+  { name: 'Joins or leaves the queue', value: 'queue' },
   { name: 'Match found (who they play)', value: 'match' },
   { name: 'Game result', value: 'result' },
 ] as const
@@ -55,7 +55,7 @@ function command(name: string, description: string) {
 }
 
 const COMMANDS = [
-  command('subscribe', "Get a DM when a player queues, finds a match, or finishes a game")
+  command('subscribe', 'Get a DM when a player queues or leaves, finds a match, or finishes a game')
     .addStringOption(playerOption('Player to follow'))
     .addStringOption(notifyOption('What to be notified about (default: everything)')),
   command('unsubscribe', 'Stop (some) notifications for a player')
@@ -127,6 +127,7 @@ export class Bot {
     })
 
     this.#tracker.on('queue_join', (e) => void this.#onQueueJoin(e.playerId, e.since))
+    this.#tracker.on('queue_leave', (e) => void this.#onQueueLeave(e.playerId, e.since))
     this.#tracker.on('match_start', (m) => void this.#onMatchStart(m))
     this.#tracker.on('match_result', (m, r) => void this.#onMatchResult(m, r))
   }
@@ -220,6 +221,18 @@ export class Bot {
 
   async #notify(targets: readonly string[], wants: (mask: number, target: string) => boolean, content: string) {
     await Promise.all([...this.#recipients(targets, wants)].map((u) => this.#dm(u, content)))
+  }
+
+  async #onQueueLeave(playerId: string, since: number) {
+    const queuedMs = Date.now() - since
+    // A queue state that went stale was expired by us, not left by the player.
+    if (queuedMs >= this.#cfg.staleQueueMs) return
+    await this.#named([playerId], 5_000)
+    const msg = `🚪 ${this.#label(playerId)} left the queue after ${formatDuration(queuedMs)}.`
+    await Promise.all([
+      this.#notify([playerId], (mask) => (mask & Notify.queue) !== 0, msg),
+      this.#featured([playerId]) ? this.#feed(msg) : undefined,
+    ])
   }
 
   async #onQueueJoin(playerId: string, since: number) {
@@ -360,6 +373,14 @@ export class Bot {
   async #command(i: ChatInputCommandInteraction) {
     const reply = (content: string) =>
       i.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } })
+    /** Long lists: first chunk as the reply, the rest as (ephemeral) follow-ups. */
+    const replyLines = async (lines: string[]) => {
+      const [first = '…', ...rest] = chunkLines(lines)
+      await reply(first)
+      for (const content of rest) {
+        await i.followUp({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } })
+      }
+    }
 
     switch (i.commandName) {
       case 'subscribe': {
@@ -407,8 +428,8 @@ export class Bot {
         const subs = this.#store.subscriptionsOf(i.user.id)
         if (subs.length === 0) return reply("You're not following anyone. Try /subscribe.")
         await this.#named(subs.flatMap((s) => [s.target_id, ...this.#opponentOf(s.target_id)]))
-        return reply(
-          subs.map((s) => `• ${this.#label(s.target_id)} — ${describeMask(s.mask)} · ${this.#stateLine(s.target_id)}`).join('\n')
+        return replyLines(
+          subs.map((s) => `• ${this.#label(s.target_id)} — ${describeMask(s.mask)} · ${this.#stateLine(s.target_id)}`)
         )
       }
 
@@ -443,7 +464,7 @@ export class Bot {
             : ['-# nobody']),
         ]
         if (this.#tracker.paused) lines.push('', '-# ⏸️ Paused: nobody is subscribed.')
-        return reply(truncate(lines.join('\n')))
+        return replyLines(lines)
       }
 
       case 'recent': {
@@ -452,7 +473,7 @@ export class Bot {
         if (raw && !id) return reply('Unknown player.')
         const rows = this.#store.recentMatches(10, id ?? undefined)
         await this.#named(rows.flatMap((r) => [r.player_a, r.player_b]))
-        return reply(rows.length ? truncate(rows.map((r) => this.#matchLine(r)).join('\n')) : 'No tracked matches yet.')
+        return rows.length ? replyLines(rows.map((r) => this.#matchLine(r))) : reply('No tracked matches yet.')
       }
 
       case 'matchup': {
@@ -525,6 +546,25 @@ export class Bot {
   }
 }
 
-function truncate(s: string, max = 1900): string {
-  return s.length <= max ? s : `${s.slice(0, max)}\n…`
+/** Discord's message length limit. */
+const MAX_MESSAGE_LENGTH = 2000
+
+/**
+ * Packs lines into as few messages as possible without splitting a line
+ * (unless a single line is itself over the limit).
+ */
+export function chunkLines(lines: string[], max = MAX_MESSAGE_LENGTH): string[] {
+  const chunks: string[] = []
+  let current = ''
+  for (const line of lines.flatMap((l) => (l.length > max ? l.match(new RegExp(`[^]{1,${max}}`, 'g'))! : [l]))) {
+    const next = current ? `${current}\n${line}` : line
+    if (next.length > max) {
+      chunks.push(current)
+      current = line
+    } else {
+      current = next
+    }
+  }
+  if (current) chunks.push(current)
+  return chunks
 }
