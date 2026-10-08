@@ -14,6 +14,8 @@ export type Player = {
   /** Leaderboard rank of a player outside the tracked scope (display only). */
   globalRank?: number
   mmr?: number
+  /** Current win streak (from the leaderboard, kept up to date with results we see). */
+  streak?: number
   /** wins + losses at the last leaderboard refresh; deltas mark activity. */
   games?: number
   lastActiveAt?: number
@@ -199,6 +201,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
       p.games = games
       p.name = entry.name
       p.mmr = entry.mmr
+      p.streak = entry.streak
       p.rank = i + 1
     })
     for (const p of this.players.values()) {
@@ -425,6 +428,18 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     return m
   }
 
+  /**
+   * Keeps win streaks current between leaderboard refreshes (which overwrite
+   * these with the real values): the winner's streak grows, the loser's resets.
+   */
+  #applyToStreaks(m: TrackedMatch, result: MatchRecord) {
+    const [winner, loser] = result.won ? m.players : [m.players[1], m.players[0]]
+    const w = this.players.get(winner)
+    const l = this.players.get(loser)
+    if (w?.streak !== undefined) w.streak = Math.max(0, w.streak) + 1
+    if (l?.streak !== undefined) l.streak = 0
+  }
+
   /** Marks a match as already over without any events, so the site showing it as running is ignored. */
   #rememberEnded(a: string, b: string, startTime: number, now: number) {
     for (const m of this.#ended) {
@@ -468,6 +483,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
       try {
         const result = findResult(await this.#history(m.players[0]), m)
         if (result) {
+          this.#applyToStreaks(m, result)
           this.emit('match_result', m, { status: 'found', result })
           return
         }

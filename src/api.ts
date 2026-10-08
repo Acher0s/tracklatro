@@ -46,6 +46,11 @@ export type SiteGame = {
   stake: string | null
 }
 
+export type QueueCounts = { queued: number; running: number }
+
+/** A player's standing on the season leaderboard. */
+export type RankInfo = { name: string; mmr: number; rank: number; streak: number }
+
 export class HttpError extends Error {
   readonly status: number
   readonly retryAfterMs: number | undefined
@@ -194,24 +199,24 @@ export class Api {
   async fetchUserRanks(
     queueId: string,
     userIds: string[]
-  ): Promise<Map<string, { name: string; mmr: number; rank: number } | null>> {
+  ): Promise<Map<string, RankInfo | null>> {
     const results = await this.#trpcBatch<{ channel_id: string; user_id: string }, { data: LeaderboardEntry } | null>(
       'leaderboard.get_user_rank',
       userIds.map((user_id) => ({ channel_id: queueId, user_id }))
     )
-    const out = new Map<string, { name: string; mmr: number; rank: number } | null>()
+    const out = new Map<string, RankInfo | null>()
     results.forEach((r, i) => {
       if (r instanceof Error) return
-      out.set(userIds[i]!, r ? { name: r.data.name, mmr: r.data.mmr, rank: r.data.rank } : null)
+      out.set(userIds[i]!, r ? { name: r.data.name, mmr: r.data.mmr, rank: r.data.rank, streak: r.data.streak } : null)
     })
     return out
   }
 
-  /** Total players currently queued, per queue, including ones we don't track. */
-  async fetchQueueCounts(): Promise<Map<string, number>> {
-    type Count = { queue_id: number; players_in_queue: number }
+  /** Players queued and matches running per queue, including ones we don't track. */
+  async fetchQueueCounts(): Promise<Map<string, QueueCounts>> {
+    type Count = { queue_id: number; players_in_queue: number; active_matches: number }
     const result = await this.#trpcOne<null, Count[]>('playerState.getActiveMatches', null)
-    return new Map(result.map((q) => [String(q.queue_id), q.players_in_queue]))
+    return new Map(result.map((q) => [String(q.queue_id), { queued: q.players_in_queue, running: q.active_matches }]))
   }
 
   async fetchSeasons(): Promise<SiteSeason[]> {

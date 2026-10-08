@@ -63,6 +63,10 @@ export class Store {
         PRIMARY KEY (player_a, player_b, started_at)
       );
       CREATE INDEX IF NOT EXISTS matches_started ON matches (started_at DESC);
+      CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS feed_messages (
         player_a   TEXT    NOT NULL,
         player_b   TEXT    NOT NULL,
@@ -196,6 +200,22 @@ export class Store {
             .all(playerId, playerId, limit)
         : this.#db.prepare('SELECT * FROM matches ORDER BY started_at DESC LIMIT ?').all(limit)
     ) as MatchLogRow[]
+  }
+
+  // ----------------------------------------------------------------- settings
+
+  getSetting(key: string): string | undefined {
+    return (this.#db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined)?.value
+  }
+
+  setSetting(key: string, value: string) {
+    this.#db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+      .run(key, value)
+  }
+
+  deleteSetting(key: string) {
+    this.#db.prepare('DELETE FROM settings WHERE key = ?').run(key)
   }
 
   // ------------------------------------------------------------ feed messages

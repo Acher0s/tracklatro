@@ -21,6 +21,7 @@ import { formatDuration } from './matchmaking.ts'
 import type { Directory } from './directory.ts'
 import { Emojis } from './emoji.ts'
 import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
+import { SETUP_COMMAND, ServerFeatures } from './server.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
@@ -73,6 +74,7 @@ const COMMANDS = [
     playerOption('Player you want to play')
   ),
   command('about', 'How tracklatro works and what it is tracking'),
+  SETUP_COMMAND,
 ]
 
 export class Bot {
@@ -86,6 +88,8 @@ export class Bot {
   readonly #emojis = new Emojis()
   /** 🟢/🟡/⚪ color of "queued" posts, following each player's queue session. */
   readonly #queuePosts: QueuePosts
+  /** /setup: widgets, results channel, role picker, win-streak pings. */
+  readonly #server: ServerFeatures
   readonly #startedAt = Date.now()
 
   constructor(opts: {
@@ -105,6 +109,14 @@ export class Bot {
     this.#queuePosts = new QueuePosts(this.#store, (channelId, messageId, content) =>
       this.#editMessage(channelId, messageId, content)
     )
+    this.#server = new ServerFeatures({
+      client: this.client,
+      store: this.#store,
+      tracker: this.#tracker,
+      predictor: this.#predictor,
+      label: (id) => this.#label(id),
+      named: (ids) => this.#named(ids),
+    })
     // Players who aren't ranked this season still have a Discord name.
     this.#directory.discordName = async (id) => {
       const user = await this.client.users.fetch(id)
@@ -120,10 +132,13 @@ export class Bot {
       await this.#emojis
         .sync(c.application.emojis, fileURLToPath(new URL('../assets/emoji', import.meta.url)))
         .catch((err) => console.warn('[emoji] sync failed, using plain icons:', err))
+      await this.#server.onReady()
     })
     this.client.on(Events.InteractionCreate, async (i) => {
       try {
         if (i.isAutocomplete()) await this.#autocomplete(i)
+        else if (i.isButton()) await this.#server.handleButton(i)
+        else if (i.isChatInputCommand() && i.commandName === 'setup') await this.#server.handleSetup(i)
         else if (i.isChatInputCommand()) await this.#command(i)
       } catch (err) {
         console.error('[bot] interaction failed:', err)
@@ -270,6 +285,7 @@ export class Bot {
 
   async #onQueueJoin(playerId: string, since: number) {
     void this.#queuePosts.joined(playerId)
+    void this.#server.onQueueJoin(playerId)
     await this.#named([playerId], 5_000)
     const msg = `${QUEUE_STAGE_EMOJI.queuing} ${this.#label(playerId)} queued ${ts(since)}.`
     const recipients = this.#recipients([playerId], (mask) => (mask & Notify.queue) !== 0)
@@ -379,9 +395,12 @@ export class Bot {
       // A timed-out match we'd reported as "no result" that did finish after all.
       msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)} · ${details}${m.lateResult ? ' · (finished after all)' : ''}`
     }
+    const featured = this.#featured(m.players)
     await Promise.all([
       this.#notify(m.players, (mask) => (mask & Notify.result) !== 0, msg),
-      this.#featured(m.players) ? this.#feed(msg) : undefined,
+      featured ? this.#feed(msg) : undefined,
+      // The results channel only gets matches that actually finished.
+      featured && outcome.status === 'found' ? this.#server.postResult(msg) : undefined,
     ])
   }
 

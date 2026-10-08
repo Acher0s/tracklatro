@@ -1,4 +1,4 @@
-import type { Api } from './api.ts'
+import type { Api, QueueCounts } from './api.ts'
 import type { Config } from './config.ts'
 import type { Store } from './db.ts'
 import type { Directory } from './directory.ts'
@@ -50,7 +50,7 @@ export class Predictor {
   readonly #store: Store
   readonly #tracker: Tracker
   readonly #directory: Directory
-  #queueCount: { total: number | undefined; at: number } = { total: undefined, at: 0 }
+  #queueCount: { counts: QueueCounts | undefined; at: number } = { counts: undefined, at: 0 }
   #model: MatchmakingModel
   #calibration: { increment: number; samples: number } | null = null
 
@@ -111,18 +111,22 @@ export class Predictor {
     )
   }
 
-  async #totalQueued(): Promise<number | undefined> {
+  /**
+   * Queued players / running matches in the tracked queue, including players
+   * we can't see. Cached: callers say how old a value they accept.
+   */
+  async queueCounts(maxAgeMs = QUEUE_COUNT_CACHE_MS): Promise<QueueCounts | undefined> {
     const now = Date.now()
-    if (now - this.#queueCount.at > QUEUE_COUNT_CACHE_MS) {
+    if (now - this.#queueCount.at > maxAgeMs) {
       try {
         const counts = await this.#api.fetchQueueCounts()
-        this.#queueCount = { total: counts.get(this.#cfg.queueId), at: now }
+        this.#queueCount = { counts: counts.get(this.#cfg.queueId), at: now }
       } catch (err) {
         console.warn('[predict] queue count failed:', err instanceof Error ? err.message : err)
-        this.#queueCount = { total: undefined, at: now }
+        this.#queueCount = { counts: undefined, at: now }
       }
     }
-    return this.#queueCount.total
+    return this.#queueCount.counts
   }
 
   /** Tracked players queuing right now with a known MMR. */
@@ -160,7 +164,7 @@ export class Predictor {
       : [...visible.filter((q) => q.id !== targetId), { id: targetId, mmr: targetMmr, joinedAt: now }]
     const targetJoinedAt = queue.find((q) => q.id === targetId)!.joinedAt
 
-    const total = await this.#totalQueued()
+    const total = (await this.queueCounts())?.queued
     const visibleQueued = visible.length
     const unseen = total === undefined ? null : Math.max(0, total - visibleQueued)
 

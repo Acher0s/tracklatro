@@ -10,8 +10,11 @@ Requires **Node.js 24+** (it runs the TypeScript directly and uses the built-in 
 
 1. Create an application at <https://discord.com/developers/applications>, add a bot, and copy its token.
    No privileged intents are needed.
-2. Invite it with the `bot` + `applications.commands` scopes. Optionally enable **User Install** so people
-   can use the commands from their DMs without sharing a server with the bot.
+2. Invite it with the `bot` + `applications.commands` scopes and the **View Channels**, **Send
+   Messages**, **Embed Links** and **Manage Roles** permissions:
+   `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=268454912`.
+   Optionally enable **User Install** so people can use the commands from their DMs without sharing a
+   server with the bot.
 3. Configure and run:
 
 ```bash
@@ -36,9 +39,34 @@ the top players.
 | `/matchup player` | How long until you could queue into them, and who they'd likely get instead |
 | `/recent [player]` | Recently tracked matches with results |
 | `/about` | What's tracked and how many requests the bot has made |
+| `/setup …` | Server channels: widgets, results, role picker, win-streak pings (see below) |
 
 If someone queues and gets matched between two polls, people subscribed only to **queue** still get
 the "match found" message, because from their point of view that player did queue.
+
+## Server channels (`/setup`)
+
+Server admins (**Manage Server**) can give features their own channels. These are added on top of the
+DMs and the live feed, and saved in the database:
+
+| Command | |
+| --- | --- |
+| `/setup matches #channel` | A self-updating list of ongoing matches |
+| `/setup queue #channel` | A self-updating list of players in queue |
+| `/setup results #channel` | Finished matches with their results (cancelled ones aren't posted) |
+| `/setup roles #channel @role` | A role picker with a 🔥 **Win-streak alerts** button that toggles `@role` |
+| `/setup streak #channel [min_streak]` | Pings that role when someone on a 5+ (or `min_streak`) win streak queues |
+| `/setup disable <feature>` · `/setup show` | Turn a feature off · see what's set up |
+
+- **Widgets** are one message each, edited in place when their content changes (at most every 10 s).
+  Times are Discord timestamps, so they tick on their own. If a widget message is deleted, it's posted
+  again. Footers show the queue's overall totals from `playerState.getActiveMatches`, refreshed at most
+  once a minute.
+- **Win streaks** come from the leaderboard and are updated with every result the bot sees. Each streak
+  pings once: requeuing after a cancel doesn't ping again, a longer streak does.
+- **The role** must be below the bot's own role, and **mentionable** (or give the bot **Mention
+  Everyone**) for pings to notify people. `/setup` warns about both.
+- Like the feed, results and widgets cover the tracked players: the top `TOP_N` plus anyone followed.
 
 Deck and stake icons come from `assets/emoji/{decks,stakes}/*.png`. On startup the bot uploads any
 missing ones as **application emojis** (`deck_yellow`, `stake_spectral_plus`, …). These belong to the
@@ -187,3 +215,6 @@ npm run dev       # restart on file changes
 | `src/predict.ts` | Forecasts for a target + viewers (MMR lookup, queue counts, calibration samples) |
 | `src/db.ts` | SQLite: subscriptions + match log |
 | `src/bot.ts` | Discord commands, DMs, feed |
+| `src/server.ts` | `/setup`: widgets, results channel, role picker, win-streak pings |
+| `src/widgets.ts` | Widget and alert content (pure, tested) |
+| `src/queue-posts.ts` | 🟢/🟡/⚪ coloring of "queued" posts |

@@ -37,7 +37,7 @@ test('forecast: likely opponent, personal estimate, unranked viewer, unseen queu
       requested.push(ids)
       return new Map(ids.map((id) => [id, id === 'outsider' ? { name: 'Outsider', mmr: 1250, rank: 412 } : null]))
     },
-    fetchQueueCounts: async () => new Map([['1', 4]]),
+    fetchQueueCounts: async () => new Map([['1', { queued: 4, running: 0 }]]),
   } as unknown as Api
   const store = new Store(':memory:')
   const tracker = new Tracker({ api, config, isWatched: () => false, hasConsumers: () => true })
@@ -83,7 +83,7 @@ test('forecast: likely opponent, personal estimate, unranked viewer, unseen queu
 test('forecast flags when the viewer is the one who gets the target', async () => {
   const api = {
     fetchUserRanks: async () => new Map(),
-    fetchQueueCounts: async () => new Map([['1', 1]]),
+    fetchQueueCounts: async () => new Map([['1', { queued: 1, running: 0 }]]),
   } as unknown as Api
   const store = new Store(':memory:')
   const tracker = new Tracker({ api, config, isWatched: () => false, hasConsumers: () => true })

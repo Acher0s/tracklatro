@@ -1,7 +1,7 @@
-import type { Api } from './api.ts'
+import type { Api, RankInfo } from './api.ts'
 import type { Tracker } from './tracker.ts'
 
-export type PlayerInfo = { name: string; mmr: number | null; rank: number | null }
+export type PlayerInfo = { name: string; mmr: number | null; rank: number | null; streak: number | null }
 
 /** Ranked data moves; names barely do. */
 const RANKED_TTL_MS = 30 * 60_000
@@ -72,7 +72,7 @@ export class Directory {
 
   async #lookup(ids: string[]) {
     const now = Date.now()
-    let ranked = new Map<string, { name: string; mmr: number; rank: number } | null>()
+    let ranked = new Map<string, RankInfo | null>()
     try {
       ranked = await this.#api.fetchUserRanks(this.#queueId, ids)
     } catch (err) {
@@ -81,20 +81,21 @@ export class Directory {
     await Promise.all(
       ids.map(async (id) => {
         const entry = ranked.get(id)
-        let info: PlayerInfo | null = entry ? { name: entry.name, mmr: entry.mmr, rank: entry.rank } : null
+        let info: PlayerInfo | null = entry ? { name: entry.name, mmr: entry.mmr, rank: entry.rank, streak: entry.streak } : null
         if (!info && ranked.has(id)) {
           // Not on the ranked leaderboard this season: ask Discord for a name.
           const name = await this.discordName?.(id).catch(() => undefined)
-          if (name) info = { name, mmr: null, rank: null }
+          if (name) info = { name, mmr: null, rank: null, streak: null }
         }
         // Don't cache network failures: leave them for the next attempt.
         if (ranked.has(id)) this.#cache.set(id, { info, at: now })
-        this.#apply(id, info)
+        this.#apply(id, info, true)
       })
     )
   }
 
-  #apply(id: string, info: PlayerInfo | null) {
+  /** `fresh`: just looked up (vs. re-applied from cache, which mustn't undo streaks updated from results). */
+  #apply(id: string, info: PlayerInfo | null, fresh = false) {
     const p = this.#tracker.players.get(id)
     if (!p || !info) return
     // Only called for players outside the tracked range, so this never
@@ -102,5 +103,6 @@ export class Directory {
     p.name = info.name
     if (info.mmr !== null) p.mmr = info.mmr
     p.globalRank = info.rank ?? undefined
+    if (info.streak !== null && (fresh || p.streak === undefined)) p.streak = info.streak
   }
 }
