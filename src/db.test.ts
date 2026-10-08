@@ -31,6 +31,16 @@ test('feed start posts are found with start-time slack and only taken once', () 
   store.close()
 })
 
+test('matchEnded recognizes settled matches with start-time slack', () => {
+  const store = new Store(':memory:')
+  store.logMatchStart('a', 'b', 100_000)
+  assert.equal(store.matchEnded('a', 'b', 100_000), false) // still running
+  store.logMatchResult('a', 'b', 100_000, 200_000, null, null)
+  assert.equal(store.matchEnded('a', 'b', 100_030), true)
+  assert.equal(store.matchEnded('a', 'b', 100_000 + 10 * 60_000), false) // a later match
+  store.close()
+})
+
 test('match log upserts results onto started matches', () => {
   const store = new Store(':memory:')
   store.logMatchStart('a', 'b', 100)

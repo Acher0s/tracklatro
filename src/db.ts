@@ -165,6 +165,18 @@ export class Store {
       .run(a, b, startedAt, endedAt, matchId, winnerId)
   }
 
+  /** Whether this match (players sorted, start time ± slack) was already settled, e.g. before a restart. */
+  matchEnded(a: string, b: string, startedAt: number, slackMs = 2 * 60_000): boolean {
+    return (
+      this.#db
+        .prepare(
+          `SELECT 1 FROM matches
+           WHERE player_a = ? AND player_b = ? AND started_at BETWEEN ? AND ? AND ended_at IS NOT NULL LIMIT 1`
+        )
+        .get(a, b, startedAt - slackMs, startedAt + slackMs) !== undefined
+    )
+  }
+
   /** How long recent completed matches took (start → observed end), for the match timeout. */
   completedDurations(limit = 500): number[] {
     const rows = this.#db

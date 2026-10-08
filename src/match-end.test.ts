@@ -130,6 +130,40 @@ test('a timed-out match is reported, and corrected if it turns out to have finis
   assert.equal(outcomes[1]?.late, true)
 })
 
+test('after a restart, a stuck match that was already settled is ignored', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const settled = new Set(['a:b'])
+  const tracker = new Tracker({
+    api: {} as Api,
+    config,
+    isWatched: () => false,
+    hasConsumers: () => true,
+    history: async () => [],
+    matchTimeoutMs: () => 45 * 60_000,
+    wasEnded: (a, b) => settled.has(`${a}:${b}`),
+  })
+  t.after(() => tracker.stop())
+  const events: string[] = []
+  tracker.on('match_end', (m) => events.push(`end ${m.players.join('-')}`))
+  tracker.on('match_result', (m) => events.push(`result ${m.players.join('-')}`))
+
+  // Fresh start: the site still shows both cancelled matches as running, hours later.
+  const later = T0 + 2 * 3_600_000 - 60_000
+  tracker.observe(states({ a: inGame('b'), b: inGame('a'), c: inGame('d'), d: inGame('c') }), later)
+  assert.equal(tracker.players.get('a')?.snapshot?.kind, 'idle')
+  assert.equal(tracker.players.get('b')?.snapshot?.kind, 'idle')
+  // Only the never-settled one is tracked (and then times out).
+  assert.deepEqual(
+    [...tracker.activeMatches].map((m) => m.players.join('-')),
+    ['c-d']
+  )
+  tracker.checkTimeouts(later)
+  assert.deepEqual(events, ['end c-d'])
+  // Next rounds: a-b stays quiet, no re-registration.
+  tracker.observe(states({ a: inGame('b'), b: inGame('a') }), later + 10_000)
+  assert.equal(tracker.activeMatches.size, 0)
+})
+
 test('adaptiveMatchTimeout learns from completed match durations', () => {
   const min = 60_000
   assert.equal(adaptiveMatchTimeout([20 * min], 90 * min, 180 * min), 90 * min) // too few samples

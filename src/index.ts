@@ -29,6 +29,7 @@ const tracker = new Tracker({
   hasConsumers: () => Boolean(config.feedChannelId) || store.hasAnySubscriptions(),
   history: (id) => results.history(id),
   matchTimeoutMs,
+  wasEnded: (a, b, startTime) => store.matchEnded(a, b, startTime),
 })
 const directory = new Directory({ api, tracker, queueId: config.queueId })
 const predictor = new Predictor({ api, config, store, tracker, directory })

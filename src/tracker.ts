@@ -121,6 +121,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   readonly #hasConsumers: () => boolean
   readonly #history: (userId: string) => Promise<MatchRecord[]>
   readonly #matchTimeoutMs: () => number
+  readonly #wasEnded: (a: string, b: string, startTime: number) => boolean
   /** Matches we ended that the site may still show as running (see TrackedMatch.lingering). */
   readonly #ended = new Set<TrackedMatch>()
   #timers = new Set<NodeJS.Timeout>()
@@ -139,6 +140,8 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     history?: (userId: string) => Promise<MatchRecord[]>
     /** How long a match may show as running before we treat it as over (see adaptiveMatchTimeout). */
     matchTimeoutMs?: () => number
+    /** Whether a match was already settled earlier (e.g. before a restart); players sorted. */
+    wasEnded?: (a: string, b: string, startTime: number) => boolean
   }) {
     super()
     this.#api = opts.api
@@ -147,6 +150,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     this.#hasConsumers = opts.hasConsumers
     this.#history = opts.history ?? (async () => [])
     this.#matchTimeoutMs = opts.matchTimeoutMs ?? (() => this.#cfg.staleMatchMs)
+    this.#wasEnded = opts.wasEnded ?? (() => false)
     this.#warmTop = this.#cfg.topN === 0 ? 100 : this.#cfg.topN
   }
 
@@ -344,7 +348,17 @@ export class Tracker extends EventEmitter<TrackerEvents> {
       if (!prev) {
         // Baseline: don't announce what was already going on, but remember
         // running matches so we can still report their results.
-        if (next.kind === 'in_game') this.#registerMatch(id, next.opponentId, next.startTime, now, true)
+        if (next.kind === 'in_game') {
+          const [a, b] = [id, next.opponentId].sort() as [string, string]
+          if (this.#wasEnded(a, b, next.startTime)) {
+            // Settled before (typically a cancelled match the site never
+            // cleared, seen again after a restart): it's over, stay quiet.
+            this.#rememberEnded(a, b, next.startTime, now)
+            p.snapshot = { kind: 'idle' }
+          } else {
+            this.#registerMatch(id, next.opponentId, next.startTime, now, true)
+          }
+        }
         continue
       }
 
@@ -409,6 +423,24 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     }
     this.activeMatches.add(m)
     return m
+  }
+
+  /** Marks a match as already over without any events, so the site showing it as running is ignored. */
+  #rememberEnded(a: string, b: string, startTime: number, now: number) {
+    for (const m of this.#ended) {
+      if (this.#isMatch(m, a, b, startTime)) return
+    }
+    this.#ended.add({
+      players: [a, b],
+      startTime,
+      detectedAt: now,
+      endedAt: now,
+      late: true,
+      unseenQueue: new Set(),
+      queueJoins: new Map(),
+      lingering: new Set([a, b]),
+      resultReported: true,
+    })
   }
 
   #endMatch(m: TrackedMatch, now: number, reason: EndReason) {

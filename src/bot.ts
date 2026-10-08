@@ -356,6 +356,9 @@ export class Bot {
     let msg: string
     if (outcome.status !== 'found') {
       this.#store.logMatchResult(a, b, m.startTime, ended, null, null)
+      // Never announced (first seen already running, e.g. at startup) and nothing to
+      // report: usually a cancelled match the site never cleared. Stay quiet.
+      if (m.late) return
       const why = outcome.status === 'not_found' ? 'no result (likely cancelled)' : 'result unavailable'
       msg = `⚪ ${this.#label(a)} vs ${this.#label(b)} ended · ${why}.`
     } else {
