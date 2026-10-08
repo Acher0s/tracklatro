@@ -79,3 +79,27 @@ test('forecast: likely opponent, personal estimate, unranked viewer, unseen queu
   tracker.stop()
   store.close()
 })
+
+test('forecast flags when the viewer is the one who gets the target', async () => {
+  const api = {
+    fetchUserRanks: async () => new Map(),
+    fetchQueueCounts: async () => new Map([['1', 1]]),
+  } as unknown as Api
+  const store = new Store(':memory:')
+  const tracker = new Tracker({ api, config, isWatched: () => false, hasConsumers: () => true })
+  const directory = new Directory({ api, tracker, queueId: '1' })
+  const predictor = new Predictor({ api, config, store, tracker, directory })
+
+  const now = Date.now()
+  tracker.applyLeaderboard([entry('target', 1361), entry('me', 1202)], now)
+  tracker.observe(new Map([['target', { status: 'queuing', queueStartTime: now - 5_000 }], ['me', null]]), now)
+
+  const me = (await predictor.forecast('target', ['me']))?.viewers.get('me')
+  assert.equal(me?.kind, 'estimate')
+  if (me?.kind === 'estimate') {
+    assert.equal(me.outcome?.opponent, 'me')
+    assert.equal(me.outcome?.isYou, true)
+  }
+  tracker.stop()
+  store.close()
+})

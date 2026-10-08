@@ -39,7 +39,6 @@ export function loadConfig() {
     feedChannelId: optional('FEED_CHANNEL_ID'),
 
     siteUrl: str('SITE_URL', 'https://balatromp.com').replace(/\/+$/, ''),
-    botlatroUrl: str('BOTLATRO_URL', 'http://balatro.virtualized.dev:4931').replace(/\/+$/, ''),
     contact: optional('CONTACT'),
 
     queueId: str('QUEUE_ID', '1'),

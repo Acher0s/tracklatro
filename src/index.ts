@@ -4,16 +4,19 @@ import { loadConfig } from './config.ts'
 import { Store } from './db.ts'
 import { Directory } from './directory.ts'
 import { Predictor } from './predict.ts'
+import { ResultSource } from './results.ts'
 import { Tracker } from './tracker.ts'
 
 const config = loadConfig()
 const store = new Store(config.dbPath)
 const api = new Api(config)
+const results = new ResultSource(api)
 const tracker = new Tracker({
   api,
   config,
   isWatched: (id) => store.isWatched(id),
   hasConsumers: () => Boolean(config.feedChannelId) || store.hasAnySubscriptions(),
+  history: (id) => results.history(id),
 })
 const directory = new Directory({ api, tracker, queueId: config.queueId })
 const predictor = new Predictor({ api, config, store, tracker, directory })
@@ -23,7 +26,7 @@ tracker.on('queue_join', (e) => console.log(`[event] queue_join ${e.playerId}`))
 tracker.on('queue_leave', (e) => console.log(`[event] queue_leave ${e.playerId}`))
 tracker.on('match_start', (m) => console.log(`[event] match_start ${m.players.join(' vs ')}${m.late ? ' (late)' : ''}`))
 tracker.on('match_result', (m, o) =>
-  console.log(`[event] match_result ${m.players.join(' vs ')} → ${o.status === 'found' ? `#${o.result.match_id}` : o.status}`)
+  console.log(`[event] match_result ${m.players.join(' vs ')} → ${o.status === 'found' ? `#${o.result.matchId} (${o.result.deck ?? '?'}, ${o.result.stake ?? '?'})` : o.status}`)
 )
 
 await bot.start()

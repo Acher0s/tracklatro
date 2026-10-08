@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { type Api, HttpError, type LeaderboardEntry, MAX_BATCH_SIZE, type PlayerMatch } from './api.ts'
+import { type Api, HttpError, type LeaderboardEntry, MAX_BATCH_SIZE } from './api.ts'
 import type { Config } from './config.ts'
+import { findResult, type MatchRecord } from './results.ts'
 import { normalize, type Snapshot, transitions } from './state.ts'
 
 export type Tier = 'hot' | 'warm' | 'cold'
@@ -37,10 +38,10 @@ export type TrackedMatch = {
 }
 
 export type MatchOutcome =
-  | { status: 'found'; result: PlayerMatch }
-  /** Botlatro answered but has no completed match: almost always a cancelled game. */
+  | { status: 'found'; result: MatchRecord }
+  /** Match history answered but has no such match: almost always a cancelled game. */
   | { status: 'not_found' }
-  /** Botlatro could not be reached for any lookup attempt. */
+  /** Match history could not be reached for any lookup attempt. */
   | { status: 'unavailable' }
 
 type TrackerEvents = {
@@ -55,7 +56,7 @@ type TrackerEvents = {
 
 /** Two observations of the same match from either player differ by a few ms. */
 const SAME_MATCH_TOLERANCE_MS = 2 * 60_000
-/** Retry schedule for looking up a finished match in Botlatro's history. */
+/** Retry schedule for looking up a finished match in the site's match history. */
 const RESULT_LOOKUP_DELAYS_MS = [5_000, 30_000, 90_000, 300_000]
 const MAX_BACKOFF_MS = 5 * 60_000
 
@@ -79,6 +80,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   readonly #cfg: Config
   readonly #isWatched: (id: string) => boolean
   readonly #hasConsumers: () => boolean
+  readonly #history: (userId: string) => Promise<MatchRecord[]>
   #timers = new Set<NodeJS.Timeout>()
   #pollFailures = 0
   #stopped = false
@@ -91,12 +93,15 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     isWatched: (id: string) => boolean
     /** If nobody would receive events, skip state polling entirely. */
     hasConsumers: () => boolean
+    /** A player's recent match history, for looking up results. */
+    history?: (userId: string) => Promise<MatchRecord[]>
   }) {
     super()
     this.#api = opts.api
     this.#cfg = opts.config
     this.#isWatched = opts.isWatched
     this.#hasConsumers = opts.hasConsumers
+    this.#history = opts.history ?? (async () => [])
     this.#warmTop = this.#cfg.topN === 0 ? 100 : this.#cfg.topN
   }
 
@@ -341,16 +346,16 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     this.#lookupResult(m, 0, false)
   }
 
-  #lookupResult(m: TrackedMatch, attempt: number, reachedBotlatro: boolean) {
+  #lookupResult(m: TrackedMatch, attempt: number, reachedHistory: boolean) {
     const delay = RESULT_LOOKUP_DELAYS_MS[attempt]
     if (delay === undefined) {
-      this.emit('match_result', m, { status: reachedBotlatro ? 'not_found' : 'unavailable' })
+      this.emit('match_result', m, { status: reachedHistory ? 'not_found' : 'unavailable' })
       return
     }
     this.#later(delay, async () => {
       try {
-        const result = findResult(await this.#api.fetchRecentMatches(m.players[0]), m)
-        reachedBotlatro = true
+        const result = findResult(await this.#history(m.players[0]), m)
+        reachedHistory = true
         if (result) {
           this.emit('match_result', m, { status: 'found', result })
           return
@@ -358,27 +363,9 @@ export class Tracker extends EventEmitter<TrackerEvents> {
       } catch (err) {
         console.error('[tracker] result lookup failed:', describe(err))
       }
-      this.#lookupResult(m, attempt + 1, reachedBotlatro)
+      this.#lookupResult(m, attempt + 1, reachedHistory)
     })
   }
-}
-
-/**
- * Finds the completed history entry for a tracked match, from the perspective
- * of `m.players[0]`. Botlatro match ids are sequential, so among completed
- * matches against this opponent that weren't created before the match
- * started, the newest is the one that just ended.
- */
-export function findResult(history: PlayerMatch[], m: TrackedMatch): PlayerMatch | null {
-  const opponent = m.players[1]
-  const candidates = history.filter(
-    (h) =>
-      h.winning_team !== null &&
-      h.opponents.some((o) => o.user_id === opponent) &&
-      Date.parse(h.created_at) >= m.startTime - 60_000
-  )
-  candidates.sort((a, b) => b.match_id - a.match_id)
-  return candidates[0] ?? null
 }
 
 function describe(err: unknown): string {

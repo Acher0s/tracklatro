@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { Api, LeaderboardEntry, PlayerMatch, RemotePlayerState } from './api.ts'
+import type { Api, LeaderboardEntry, RemotePlayerState } from './api.ts'
 import type { Config } from './config.ts'
-import { findResult, type TrackedMatch, Tracker } from './tracker.ts'
+import { Tracker } from './tracker.ts'
 
 const config = {
   topN: 100,
@@ -122,38 +122,4 @@ test('selectBatch only requests when something is due, and fills spare slots wit
 
   // 30s later the top-100 warm players are due too: 101 due → 2 requests' worth.
   assert.equal(tracker.selectBatch(1_030_000).length, 200)
-})
-
-test('findResult picks the newest completed match against the opponent', () => {
-  const m: TrackedMatch = { players: ['a', 'b'], startTime: Date.parse('2026-10-08T10:00:00Z'), detectedAt: 0, late: false, unseenQueue: new Set(), queueJoins: new Map() }
-  const h = (match_id: number, created_at: string, opp: string, winning_team: number | null = 1): PlayerMatch => ({
-    match_id,
-    created_at,
-    winning_team,
-    opponents: [{ user_id: opp, name: opp, team: 2, elo_change: -10, mmr_after: 990 }],
-    player_name: 'a',
-    player_id: 'a',
-    queue_id: 1,
-    mmr_after: 1010,
-    won: true,
-    elo_change: 10,
-    team: 1,
-    deck: null,
-    stake: null,
-    best_of_3: false,
-    best_of_5: false,
-  })
-  assert.equal(
-    findResult(
-      [
-        h(5, '2026-10-08T10:20:00Z', 'b', null), // still running → ignore
-        h(4, '2026-10-08T10:00:01Z', 'b'),
-        h(3, '2026-10-08T09:30:00Z', 'b'), // earlier game vs same opponent
-        h(2, '2026-10-08T10:00:05Z', 'c'),
-      ],
-      m
-    )?.match_id,
-    4
-  )
-  assert.equal(findResult([h(3, '2026-10-08T09:30:00Z', 'b')], m), null) // cancelled
 })

@@ -40,8 +40,8 @@ export type ViewerForecast =
       instaqueue: boolean
       /** If you queue now, when you and the target become pairable (ignoring everyone else). */
       pairableAt: number
-      /** Simulated outcome with you in the queue: who the target ends up with. */
-      outcome: { opponent: string; at: number } | null
+      /** Simulated outcome with you in the queue: who the target ends up with (`isYou`: you do). */
+      outcome: { opponent: string; at: number; isYou: boolean } | null
     }
 
 export class Predictor {
@@ -71,9 +71,8 @@ export class Predictor {
   /** Where the increment comes from, for /about. */
   get modelSource(): string {
     if (this.#cfg.matchmaking.searchIncrement !== undefined) return 'configured'
-    if (this.#calibration) return `calibrated from ${this.#calibration.samples} observed pairings`
-    const have = this.#store.queueSamples().length
-    return `Botlatro default (calibrating: ${have} pairings observed so far)`
+    if (this.#calibration) return `calibrated on ${this.#calibration.samples} games`
+    return `default, calibrating: ${this.#store.queueSamples().length} games seen`
   }
 
   #buildModel(): MatchmakingModel {
@@ -209,7 +208,7 @@ export class Predictor {
       gap: Math.abs(mmr - targetMmr),
       instaqueue: bothInInstaqueue(this.#model, mmr, targetMmr),
       pairableAt: now + pairableIn,
-      outcome: outcome ? { opponent: outcome.opponent, at: outcome.at } : null,
+      outcome: outcome ? { opponent: outcome.opponent, at: outcome.at, isYou: outcome.opponent === viewerId } : null,
     }
   }
 }

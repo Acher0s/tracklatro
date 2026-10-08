@@ -12,11 +12,13 @@ import {
   SlashCommandBuilder,
   type SlashCommandStringOption,
 } from 'discord.js'
+import { fileURLToPath } from 'node:url'
 import type { Api } from './api.ts'
 import type { Config } from './config.ts'
 import { describeMask, NOTIFY_ALL, Notify, type NotifyKind, type Store } from './db.ts'
 import { formatDuration } from './matchmaking.ts'
 import type { Directory } from './directory.ts'
+import { Emojis } from './emoji.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
@@ -79,6 +81,7 @@ export class Bot {
   readonly #api: Api
   readonly #predictor: Predictor
   readonly #directory: Directory
+  readonly #emojis = new Emojis()
   readonly #startedAt = Date.now()
 
   constructor(opts: {
@@ -107,6 +110,9 @@ export class Bot {
       if (this.#cfg.guildId) await c.application.commands.set(body, this.#cfg.guildId)
       else await c.application.commands.set(body)
       console.log(`[bot] registered ${body.length} commands ${this.#cfg.guildId ? `in guild ${this.#cfg.guildId}` : 'globally'}`)
+      await this.#emojis
+        .sync(c.application.emojis, fileURLToPath(new URL('../assets/emoji', import.meta.url)))
+        .catch((err) => console.warn('[emoji] sync failed, using plain icons:', err))
     })
     this.client.on(Events.InteractionCreate, async (i) => {
       try {
@@ -218,7 +224,7 @@ export class Bot {
 
   async #onQueueJoin(playerId: string, since: number) {
     await this.#named([playerId], 5_000)
-    const msg = `🟡 ${this.#label(playerId)} joined the queue ${ts(since)}.`
+    const msg = `🟡 ${this.#label(playerId)} queued ${ts(since)}.`
     const recipients = this.#recipients([playerId], (mask) => (mask & Notify.queue) !== 0)
     // Forecasts only cost requests when someone will actually read them.
     const forecast = recipients.size
@@ -239,38 +245,30 @@ export class Bot {
 
   #forecastLines(f: Forecast, you?: ViewerForecast): string[] {
     const now = Date.now()
-    const ifQueued = f.targetQueuing ? '' : 'if they queued now, '
-    const others = `${f.visibleOthers} other${f.visibleOthers === 1 ? '' : 's'} visible in queue${f.unseen ? ` (+${f.unseen} I can't see)` : ''}`
-    const lines: string[] = []
-
-    if (f.likely) {
-      const gap = Math.round(Math.abs(f.likely.opponentMmr - f.targetMmr))
-      lines.push(
-        `🔮 Likely opponent ${ifQueued}${this.#label(f.likely.opponent)}, gap ${gap} MMR, in ~${formatDuration(f.likely.at - now)} — ${others}.`
-      )
-    } else {
-      lines.push(`🔮 Nobody I can see in the queue would get paired with them soon — ${others}.`)
-    }
+    const inMs = (at: number) => `~${formatDuration(at - now)}`
+    const queue = `${f.visibleOthers} other${f.visibleOthers === 1 ? '' : 's'} visible in queue${f.unseen ? ` (+${f.unseen} I can't see)` : ''}`
+    const lines = [f.likely ? `🔮 Likely vs ${this.#label(f.likely.opponent)} in ${inMs(f.likely.at)} · ${queue}.` : `🔮 ${queue}.`]
 
     if (you?.kind === 'estimate') {
-      const who = `you ${Math.round(you.mmr)} vs ${Math.round(f.targetMmr)}, gap ${Math.round(you.gap)}${you.instaqueue ? ', both in an instaqueue band' : ''}`
-      const when = f.targetQueuing ? 'If you queue now' : 'If you both queued now'
-      if (you.outcome?.opponent === undefined || you.outcome.opponent === f.targetId) {
-        // Simulated pairing between the two of you (or nobody else in the way).
-        lines.push(`🎯 ${when}, you'd likely get them in ~${formatDuration((you.outcome?.at ?? you.pairableAt) - now)} (${who}).`)
-      } else {
+      const how = you.instaqueue ? 'instaqueue' : `gap ${Math.round(you.gap)}`
+      const o = you.outcome
+      if (o?.isYou) {
+        lines.push(`🎯 If you queued now, you'd match against them in ${inMs(o.at)} (${how}).`)
+      } else if (o) {
         lines.push(
-          `🎯 ${when}, you'd be in range of each other after ~${formatDuration(you.pairableAt - now)} (${who}), ` +
-            `but they'd likely be paired with ${this.#label(you.outcome.opponent)} first (~${formatDuration(you.outcome.at - now)}).`
+          `🎯 If you queued now, you'd be in range in ${inMs(you.pairableAt)} (${how}), ` +
+            `but they'd likely be paired with ${this.#label(o.opponent)} first (${inMs(o.at)}).`
         )
+      } else {
+        lines.push(`🎯 If you queued now, you'd be in range in ${inMs(you.pairableAt)} (${how}).`)
       }
     } else if (you?.kind === 'unranked') {
-      lines.push("🎯 I couldn't find your ranked MMR, so there's no personal estimate.")
+      lines.push("🎯 You're not on the ranked leaderboard, so no estimate.")
     } else if (you?.kind === 'busy') {
-      lines.push(you.status === 'in_game' ? "🎯 You're in a game right now." : "🎯 You're already queuing; you're included above.")
+      lines.push(you.status === 'in_game' ? "🎯 You're in a game." : "🎯 You're already queuing (counted above).")
     }
 
-    lines.push("-# Speculation from Botlatro's matchmaking rules and the queue I can see; anyone joining or leaving changes it.")
+    lines.push('-# Speculative: assumes nobody joins or leaves the queue.')
     return lines
   }
 
@@ -278,8 +276,7 @@ export class Bot {
     const [a, b] = m.players
     this.#store.logMatchStart(a, b, m.startTime)
     await this.#named(m.players, 5_000)
-    const when = m.late ? `started ${ts(m.startTime)} (noticed late)` : `started ${ts(m.startTime)}`
-    const msg = `⚔️ ${this.#label(a)} vs ${this.#label(b)} — match ${when}.`
+    const msg = `⚔️ ${this.#label(a)} vs ${this.#label(b)} · started ${ts(m.startTime)}${m.late ? ' (seen late)' : ''}.`
     await Promise.all([
       this.#notify(
         m.players,
@@ -299,25 +296,22 @@ export class Bot {
     let msg: string
     if (outcome.status !== 'found') {
       this.#store.logMatchResult(a, b, m.startTime, ended, null, null)
-      msg =
-        outcome.status === 'not_found'
-          ? `⚪ ${this.#label(a)} vs ${this.#label(b)} ended ${ts(ended)} without a recorded result (probably cancelled).`
-          : `⚪ ${this.#label(a)} vs ${this.#label(b)} ended ${ts(ended)}; the result couldn't be fetched (match history unavailable).`
+      const why = outcome.status === 'not_found' ? 'no result (likely cancelled)' : 'result unavailable'
+      msg = `⚪ ${this.#label(a)} vs ${this.#label(b)} ended · ${why}.`
     } else {
       const r = outcome.result
-      // r is from a's perspective.
-      const opp = r.opponents.find((o) => o.user_id === b)
-      const aWon = r.won
-      const [winner, loser] = aWon ? [a, b] : [b, a]
-      const delta = (id: string) => {
-        const v = id === a ? r.elo_change : (opp?.elo_change ?? 0)
-        return `${v >= 0 ? '+' : ''}${v.toFixed(1)}`
-      }
-      this.#store.logMatchResult(a, b, m.startTime, ended, r.match_id, winner)
-      const details = [r.deck, r.stake, r.best_of_5 ? 'Bo5' : r.best_of_3 ? 'Bo3' : null].filter(Boolean).join(' · ')
-      msg =
-        `🏆 ${this.#label(winner)} beat ${this.#label(loser)} ` +
-        `(${delta(winner)} / ${delta(loser)})${details ? ` — ${details}` : ''} · match #${r.match_id}, ended ${ts(ended)}.`
+      // r is from a's perspective (the site only reports that player's MMR change).
+      const [winner, loser] = r.won ? [a, b] : [b, a]
+      this.#store.logMatchResult(a, b, m.startTime, ended, r.matchId, winner)
+      const change = `${r.mmrChange >= 0 ? '+' : ''}${r.mmrChange.toFixed(1)} for ${escapeMarkdown(this.#name(r.playerId))}`
+      const details = [
+        r.deck && `${this.#emojis.get('deck', r.deck)} ${r.deck}`,
+        r.stake && `${this.#emojis.get('stake', r.stake)} ${r.stake}`,
+        change,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)}\n${details}`
     }
     await Promise.all([
       this.#notify(m.players, (mask) => (mask & Notify.result) !== 0, msg),
@@ -370,28 +364,28 @@ export class Bot {
     switch (i.commandName) {
       case 'subscribe': {
         const id = this.#resolvePlayer(i.options.getString('player', true))
-        if (!id) return reply("I don't know that player. Pick one from the suggestions, or paste their Discord user id.")
-        if (id === i.user.id) return reply("You'll already know when you queue. 🙂")
+        if (!id) return reply('Unknown player. Pick a suggestion or paste a user ID.')
+        if (id === i.user.id) return reply("That's you. 🙂")
         const existing = this.#store.subscriptionsOf(i.user.id)
         if (!existing.some((s) => s.target_id === id) && existing.length >= this.#cfg.maxSubscriptionsPerUser) {
-          return reply(`You can follow at most ${this.#cfg.maxSubscriptionsPerUser} players. Use /unsubscribe first.`)
+          return reply(`You can follow up to ${this.#cfg.maxSubscriptionsPerUser} players. /unsubscribe someone first.`)
         }
         const mask = this.#store.subscribe(i.user.id, id, maskFromChoice(i.options.getString('notify')))
         this.#tracker.heat(id) // poll them right away so /status is fresh
         const outside = this.#player(id)?.rank === undefined
         await reply(
-          `Following ${this.#label(id)} — you'll be DM'd about: **${describeMask(mask)}**.` +
-            (outside ? '\n-# This player is outside the tracked leaderboard range; they are tracked because you follow them.' : '')
+          `Following ${this.#label(id)} (${describeMask(mask)}).` +
+            (outside ? '\n-# Outside the tracked range; tracked because you follow them.' : '')
         )
         // Make sure DMs actually reach them; include how this matchup looks.
         const forecast = await this.#predictor.forecast(id, [i.user.id]).catch(() => null)
-        const lines = [`🔔 You're now following ${this.#label(id)} (${describeMask(mask)}).`]
+        const lines = [`🔔 Following ${this.#label(id)} (${describeMask(mask)}).`]
         if (forecast) lines.push(...this.#forecastLines(forecast.base, forecast.viewers.get(i.user.id)))
         try {
           await i.user.send({ content: lines.join('\n'), allowedMentions: { parse: [] } })
         } catch {
           await i.followUp({
-            content: "⚠️ I couldn't DM you. Enable DMs from server members (or add me as a user app), otherwise you won't receive notifications.",
+            content: "⚠️ I can't DM you. Allow DMs from server members (or add me as a user app) to get notifications.",
             flags: MessageFlags.Ephemeral,
           })
         }
@@ -400,18 +394,18 @@ export class Bot {
 
       case 'unsubscribe': {
         const id = this.#resolvePlayer(i.options.getString('player', true))
-        if (!id || !this.#store.subscribersOf(id).has(i.user.id)) return reply("You aren't following that player.")
+        if (!id || !this.#store.subscribersOf(id).has(i.user.id)) return reply("You're not following that player.")
         const remaining = this.#store.unsubscribe(i.user.id, id, maskFromChoice(i.options.getString('notify')))
         return reply(
           remaining === 0
-            ? `Stopped following ${this.#label(id)}.`
-            : `Updated: you'll still be DM'd about **${describeMask(remaining)}** for ${this.#label(id)}.`
+            ? `Unfollowed ${this.#label(id)}.`
+            : `Still following ${this.#label(id)} (${describeMask(remaining)}).`
         )
       }
 
       case 'subscriptions': {
         const subs = this.#store.subscriptionsOf(i.user.id)
-        if (subs.length === 0) return reply('You are not following anyone. Use /subscribe.')
+        if (subs.length === 0) return reply("You're not following anyone. Try /subscribe.")
         await this.#named(subs.flatMap((s) => [s.target_id, ...this.#opponentOf(s.target_id)]))
         return reply(
           subs.map((s) => `• ${this.#label(s.target_id)} — ${describeMask(s.mask)} · ${this.#stateLine(s.target_id)}`).join('\n')
@@ -425,8 +419,8 @@ export class Bot {
         const recent = this.#store.recentMatches(3, id)
         await this.#named([id, ...this.#opponentOf(id), ...recent.flatMap((r) => [r.player_a, r.player_b])])
         const lines = [`${this.#label(id)}: ${this.#stateLine(id)}`]
-        if (p?.lastPolledAt) lines.push(`-# last checked ${ts(p.lastPolledAt)} · ${this.#tracker.tier(p, Date.now())} tier`)
-        if (recent.length) lines.push('', '**Recent tracked matches**', ...recent.map((r) => this.#matchLine(r)))
+        if (p?.lastPolledAt) lines.push(`-# checked ${ts(p.lastPolledAt)} · ${this.#tracker.tier(p, Date.now())}`)
+        if (recent.length) lines.push('', '**Recent**', ...recent.map((r) => this.#matchLine(r)))
         return reply(lines.join('\n'))
       }
 
@@ -440,22 +434,22 @@ export class Bot {
         const lines = [
           `**Queuing (${queuing.length})**`,
           ...(queuing.length
-            ? queuing.map((p) => `• ${this.#label(p.id)} since ${ts(p.snapshot?.kind === 'queuing' ? p.snapshot.since : now)}`)
+            ? queuing.map((p) => `• ${this.#label(p.id)} · ${ts(p.snapshot?.kind === 'queuing' ? p.snapshot.since : now)}`)
             : ['-# nobody']),
           '',
           `**In game (${matches.length})**`,
           ...(matches.length
-            ? matches.map((m) => `• ${this.#label(m.players[0])} vs ${this.#label(m.players[1])} — ${ts(m.startTime)}`)
+            ? matches.map((m) => `• ${this.#label(m.players[0])} vs ${this.#label(m.players[1])} · ${ts(m.startTime)}`)
             : ['-# nobody']),
         ]
-        if (this.#tracker.paused) lines.push('', '-# ⏸️ Polling is paused because nobody is subscribed.')
+        if (this.#tracker.paused) lines.push('', '-# ⏸️ Paused: nobody is subscribed.')
         return reply(truncate(lines.join('\n')))
       }
 
       case 'recent': {
         const raw = i.options.getString('player')
         const id = raw ? this.#resolvePlayer(raw) : undefined
-        if (raw && !id) return reply("I don't know that player.")
+        if (raw && !id) return reply('Unknown player.')
         const rows = this.#store.recentMatches(10, id ?? undefined)
         await this.#named(rows.flatMap((r) => [r.player_a, r.player_b]))
         return reply(rows.length ? truncate(rows.map((r) => this.#matchLine(r)).join('\n')) : 'No tracked matches yet.')
@@ -463,18 +457,18 @@ export class Bot {
 
       case 'matchup': {
         const id = this.#resolvePlayer(i.options.getString('player', true))
-        if (!id) return reply("I don't know that player.")
-        if (id === i.user.id) return reply("You can't queue into yourself. 🙂")
+        if (!id) return reply('Unknown player.')
+        if (id === i.user.id) return reply("That's you. 🙂")
         await i.deferReply({ flags: MessageFlags.Ephemeral })
         const forecast = await this.#predictor.forecast(id, [i.user.id])
-        if (!forecast) return i.editReply(`I couldn't find ${this.#label(id)}'s ranked MMR.`)
+        if (!forecast) return i.editReply(`${this.#label(id)} isn't on the ranked leaderboard.`)
         const state = this.#player(id)?.snapshot
         const header =
           state?.kind === 'in_game'
-            ? `${this.#label(id)} is in a game right now. If they queue again afterwards:`
+            ? `${this.#label(id)} is in a game. Once they requeue:`
             : state?.kind === 'queuing'
-              ? `${this.#label(id)} has been queuing since ${ts(state.since)}.`
-              : `${this.#label(id)} isn't queuing right now. If they did:`
+              ? `${this.#label(id)} queued ${ts(state.since)}.`
+              : `${this.#label(id)} isn't queuing. If they did:`
         return i.editReply({
           content: [header, ...this.#forecastLines(forecast.base, forecast.viewers.get(i.user.id))].join('\n'),
           allowedMentions: { parse: [] },
@@ -486,17 +480,17 @@ export class Bot {
         const tiers = { hot: 0, warm: 0, cold: 0 }
         for (const p of this.#tracker.players.values()) tiers[this.#tracker.tier(p, now)]++
         const hours = Math.max((now - this.#startedAt) / 3_600_000, 1 / 60)
-        const { site, botlatro } = this.#api.requestCounts
+        const requests = this.#api.requestCount
         return reply(
           [
-            '**tracklatro** follows Balatro Multiplayer queue states from balatromp.com.',
-            `Tracking **${this.#tracker.players.size}** players (${this.#cfg.topN === 0 ? 'whole leaderboard' : `top ${this.#cfg.topN}`} + followed players):`,
-            `• 🔥 hot ${tiers.hot} — checked every ${this.#cfg.hotIntervalMs / 1000}s`,
-            `• 🌤️ warm ${tiers.warm} — every ${this.#cfg.warmIntervalMs / 1000}s`,
-            `• 🧊 cold ${tiers.cold} — rotated through spare request slots`,
-            `Requests: ${site} to the site (~${Math.round(site / hours)}/h), ${botlatro} to Botlatro (~${Math.round(botlatro / hours)}/h).`,
+            '**tracklatro** · Balatro MP queue tracker (data from balatromp.com)',
+            `Tracking **${this.#tracker.players.size}** players (${this.#cfg.topN === 0 ? 'whole leaderboard' : `top ${this.#cfg.topN}`} + followed):`,
+            `• 🔥 ${tiers.hot} hot · every ${this.#cfg.hotIntervalMs / 1000}s`,
+            `• 🌤️ ${tiers.warm} warm · every ${this.#cfg.warmIntervalMs / 1000}s`,
+            `• 🧊 ${tiers.cold} cold · in spare slots`,
+            `Requests: ${requests} (~${Math.round(requests / hours)}/h)`,
             this.#modelLine(),
-            `-# Leaderboard refreshed ${this.#tracker.lastLeaderboardAt ? ts(this.#tracker.lastLeaderboardAt) : 'never'}, last poll ${this.#tracker.lastPollAt ? ts(this.#tracker.lastPollAt) : 'never'}.`,
+            `-# Leaderboard ${this.#tracker.lastLeaderboardAt ? ts(this.#tracker.lastLeaderboardAt) : 'never'} · last poll ${this.#tracker.lastPollAt ? ts(this.#tracker.lastPollAt) : 'never'}`,
           ].join('\n')
         )
       }
@@ -506,10 +500,7 @@ export class Bot {
   #modelLine(): string {
     const m = this.#predictor.model
     const bands = m.instaqueue.map(([lo, hi]) => `${lo}–${hi}`).join(', ') || 'none'
-    return (
-      `Matchmaking model: range starts at ${m.searchStart} and grows ${+m.searchIncrement.toFixed(2)} MMR per ${m.tickMs / 1000}s ` +
-      `(${this.#predictor.modelSource}); instaqueue bands ${bands}.`
-    )
+    return `Model: +${+m.searchIncrement.toFixed(2)} MMR range per ${m.tickMs / 1000}s from ${m.searchStart} (${this.#predictor.modelSource}) · instaqueue ${bands}`
   }
 
   /** The current opponent of a player, if they're in a game (for name resolution). */
@@ -520,17 +511,17 @@ export class Bot {
 
   #stateLine(id: string): string {
     const s = this.#player(id)?.snapshot
-    if (!s) return 'unknown (not checked yet)'
-    if (s.kind === 'queuing') return `🟡 queuing since ${ts(s.since)}`
-    if (s.kind === 'in_game') return `⚔️ playing ${this.#label(s.opponentId)} since ${ts(s.startTime)}`
+    if (!s) return '❔ not checked yet'
+    if (s.kind === 'queuing') return `🟡 queuing · ${ts(s.since)}`
+    if (s.kind === 'in_game') return `⚔️ vs ${this.#label(s.opponentId)} · ${ts(s.startTime)}`
     return '💤 idle'
   }
 
   #matchLine(r: { player_a: string; player_b: string; started_at: number; ended_at: number | null; winner_id: string | null; match_id: number | null }): string {
     const [a, b] = r.winner_id === r.player_b ? [r.player_b, r.player_a] : [r.player_a, r.player_b]
     const vs = r.winner_id ? `${this.#label(a)} beat ${this.#label(b)}` : `${this.#label(a)} vs ${this.#label(b)}`
-    const status = r.ended_at === null ? 'in progress' : r.winner_id ? `#${r.match_id}` : 'no result'
-    return `• ${ts(r.started_at, 'f')} ${vs} — ${status}`
+    const status = r.ended_at === null ? 'playing' : r.winner_id ? `#${r.match_id}` : 'no result'
+    return `• ${vs} · ${status} · ${ts(r.started_at)}`
   }
 }
 

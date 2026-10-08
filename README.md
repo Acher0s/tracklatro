@@ -39,18 +39,29 @@ Set `FEED_CHANNEL_ID` for a public channel feed of queues, matches, and results 
 If someone queues and gets matched between two polls, people subscribed only to **queue** still get
 the "match found" message, because from their point of view that player did queue.
 
+Deck and stake icons come from `assets/emoji/{decks,stakes}/*.png`. On startup the bot uploads any
+missing ones as **application emojis** (`deck_yellow`, `stake_spectral_plus`, …). These belong to the
+bot itself, so they work in DMs and any server, and they show up under **Emojis** in the developer
+portal. A deck or stake without an image falls back to 🃏 / 🎲.
+
+A result notification looks like this:
+
+> 🏆 **bacon** (#1 · 1624) beat **Dominater** (#19 · 1200)
+> 🃏 Yellow Deck · 🎲 Spectral+ Stake · +12.2 for bacon
+
 ## Queue-time estimates
 
 When a player someone follows joins the queue, each subscriber's DM adds a forecast:
 
-> 🟡 **bacon** (#1 · 1624) joined the queue 3 seconds ago.
-> 🔮 Likely opponent **yenn** (#2 · 1554), gap 70 MMR, in ~4s — 1 other visible in queue (+1 I can't see).
-> 🎯 If you queue now, you'd be in range of each other after ~1 min (you 1480 vs 1624, gap 144), but they'd likely be paired with **yenn** first (~4s).
+> 🟡 **bacon** (#1 · 1624) queued 3 seconds ago.
+> 🔮 Likely vs **yenn** (#2 · 1554) in ~4s · 1 other visible in queue (+1 I can't see).
+> 🎯 If you queued now, you'd be in range in ~1 min (gap 144), but they'd likely be paired with **yenn** first (~4s).
 
 `/matchup` and the `/subscribe` confirmation DM show the same forecast on demand.
 
-These come from a model of Botlatro's matchmaker (`incrementEloCronJobAllQueues` in
-`src/utils/cronJobs.ts`), in `src/matchmaking.ts`:
+These come from a model of the queue bot's matchmaker, ported from Botlatro's source
+(`incrementEloCronJobAllQueues` in `src/utils/cronJobs.ts`) into `src/matchmaking.ts`. Only its
+rules are reused; tracklatro never contacts Botlatro itself.
 
 - A global tick runs **every 2 s**. The queue's `elo_search_speed` setting isn't used, because the
   tick interval is hard-coded.
@@ -82,13 +93,17 @@ happen. Each pairing where both queue joins were seen gives a lower bound
 
 ## How it works
 
-There is no push API, so the bot polls, and it's built to keep the request count low:
+Everything comes from **balatromp.com's public tRPC API**; nothing else is contacted. There is no
+push API, so the bot polls, and it's built to keep the request count low:
 
-| Data | Source | Cost |
+| Data | Procedure | Cost |
 | --- | --- | --- |
-| Live state (idle / queuing / in game + opponent) | `balatromp.com/api/trpc/playerState.getState` | **1 request per 100 players** (tRPC request batching) |
-| Who to track | `balatromp.com/api/trpc/leaderboard.get_leaderboard` | every 10 min: 1 request for the top 100, 3 for the whole leaderboard |
-| Game result | Botlatro `GET /api/players/:id/matches?limit=5` | 1 request per finished match (not per player), retried up to 4× |
+| Live state (idle / queuing / in game + opponent) | `playerState.getState` | **1 request per 100 players** (tRPC request batching) |
+| Who to track | `leaderboard.get_leaderboard` | every 10 min: 1 request for the top 100, 3 for the whole leaderboard |
+| Game result (winner, MMR change, deck, stake) | `history.user_games_page` (newest 3 games) | 1 request per finished match (not per player), retried up to 4× |
+| Active season (needed for history) | `seasons.list` | 1 request every 6 h |
+| Names / MMR of players outside the top 100 | `leaderboard.get_user_rank` | batched, cached 30 min |
+| Total queue size (forecasts only) | `playerState.getActiveMatches` | only when a followed player queues, cached 15 s |
 
 The bot diffs consecutive snapshots to detect queue joins and leaves, match starts, and match ends. A
 match that both players' snapshots report is merged into one event, so it's announced once.
@@ -129,7 +144,10 @@ On errors it backs off exponentially (up to 5 min) and honors `Retry-After`.
   stay "in game" forever (some are days old). States older than `STALE_MATCH_HOURS` /
   `STALE_QUEUE_HOURS` count as idle.
 - **Cancelled games** have no entry in the match history. They're reported as "no recorded result",
-  which is different from "history unavailable" (Botlatro unreachable).
+  which is different from "history unavailable" (the site couldn't be reached).
+- **Running games look finished in the history.** The site reports every game as a win or loss, so
+  only a game created between the match's start and its observed end is accepted. That keeps an
+  instant rematch that's still running from being reported as the result.
 - **Restarts.** The first observation of every player is a silent baseline. Running matches are still
   tracked so their results get reported, but they aren't re-announced.
 
@@ -146,6 +164,8 @@ npm run dev       # restart on file changes
 | `src/api.ts` | Upstream client (tRPC batching, URL-length-aware chunking) |
 | `src/state.ts` | Pure snapshot normalization + transition detection |
 | `src/tracker.ts` | Tiered scheduler, match registry, result lookup, events |
+| `src/results.ts` | Match history from the site, and matching a tracked match to its result |
+| `src/directory.ts` | Names / MMR / rank for players outside the tracked range |
 | `src/matchmaking.ts` | Model of Botlatro's matchmaker: ranges, simulation, calibration |
 | `src/predict.ts` | Forecasts for a target + viewers (MMR lookup, queue counts, calibration samples) |
 | `src/db.ts` | SQLite: subscriptions + match log |

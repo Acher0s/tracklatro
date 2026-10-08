@@ -1,11 +1,11 @@
 /**
- * Thin client for the two upstreams we read from:
- *  - balatromp.com tRPC (public procedures): leaderboard + live player state
- *  - Botlatro REST: per-player match history (for game results)
+ * Thin client for balatromp.com's public tRPC procedures: leaderboard, live
+ * player state, match history, seasons and queue counts. Nothing else is
+ * contacted.
  *
- * Everything here is read-only and designed to minimise request count:
- * player states are fetched with tRPC request batching, so N players cost
- * ceil(N / STATE_BATCH_SIZE) HTTP requests per poll instead of N.
+ * Everything here is read-only and designed to minimise request count: calls
+ * are sent with tRPC request batching, so e.g. N player states cost
+ * ceil(N / MAX_BATCH_SIZE) HTTP requests per poll instead of N.
  */
 
 /** Mirrors `PlayerState` in www/src/server/api/routers/player-state.ts */
@@ -30,29 +30,20 @@ export type LeaderboardEntry = {
   winrate: number
 }
 
-/** Mirrors `PlayerMatch` in www/src/server/services/botlatro.service.ts */
-export type PlayerMatch = {
-  match_id: number
-  player_name: string
-  player_id: string
-  queue_id: number
-  mmr_after: number
-  won: boolean
-  elo_change: number
-  team: number
-  opponents: Array<{
-    user_id: string
-    name: string
-    team: number
-    elo_change: number
-    mmr_after: number
-  }>
+/** Mirrors the `seasons` table in www/src/server/db/schema.ts (dates arrive as ISO strings). */
+export type SiteSeason = { id: number; name: string; startDate: string; endDate: string | null; isActive: boolean }
+
+/** Mirrors `SelectGames` as returned by www `history.user_games_page` (dates as ISO strings). */
+export type SiteGame = {
+  playerId: string
+  gameId: number
+  gameTime: string
+  opponentId: string
+  opponentName: string
+  mmrChange: number
+  result: 'win' | 'loss' | 'tie'
   deck: string | null
   stake: string | null
-  best_of_3: boolean
-  best_of_5: boolean
-  created_at: string
-  winning_team: number | null
 }
 
 export class HttpError extends Error {
@@ -79,21 +70,19 @@ type TrpcBatchItem<T> =
 
 export class Api {
   readonly #siteUrl: string
-  readonly #botlatroUrl: string
   readonly #userAgent: string
   #maxUrlLength = MAX_URL_LENGTH
 
-  /** Total HTTP requests made since start, by upstream. Exposed for /about. */
-  readonly requestCounts = { site: 0, botlatro: 0 }
+  /** Total HTTP requests made since start. Exposed for /about. */
+  requestCount = 0
 
-  constructor(opts: { siteUrl: string; botlatroUrl: string; contact?: string }) {
+  constructor(opts: { siteUrl: string; contact?: string }) {
     this.#siteUrl = opts.siteUrl
-    this.#botlatroUrl = opts.botlatroUrl
     this.#userAgent = `tracklatro/0.1 (Discord queue tracker${opts.contact ? `; contact: ${opts.contact}` : ''})`
   }
 
-  async #get<T>(url: string, upstream: 'site' | 'botlatro'): Promise<T> {
-    this.requestCounts[upstream]++
+  async #get<T>(url: string): Promise<T> {
+    this.requestCount++
     const res = await fetch(url, {
       headers: { 'User-Agent': this.#userAgent, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -102,7 +91,7 @@ export class Api {
       const retryAfter = Number(res.headers.get('retry-after'))
       throw new HttpError(
         res.status,
-        `${res.status} ${res.statusText} from ${new URL(url).pathname}`,
+        `${res.status} ${res.statusText} from ${new URL(url).pathname.slice(0, 80)}`,
         Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined
       )
     }
@@ -130,7 +119,7 @@ export class Api {
       const url = this.#batchUrl(procedure, inputs.slice(start, end))
       let items: TrpcBatchItem<O>[]
       try {
-        items = await this.#get<TrpcBatchItem<O>[]>(url, 'site')
+        items = await this.#get<TrpcBatchItem<O>[]>(url)
       } catch (err) {
         if (err instanceof HttpError && (err.status === 414 || err.status === 431) && end - start > 1) {
           this.#maxUrlLength = Math.floor(url.length * 0.75)
@@ -151,6 +140,14 @@ export class Api {
     return out
   }
 
+  /** A single call of a procedure; throws on a tRPC error. */
+  async #trpcOne<I, O>(procedure: string, input: I): Promise<O> {
+    const [result] = await this.#trpcBatch<I, O>(procedure, [input])
+    if (result === undefined) throw new Error(`Empty response from ${procedure}`)
+    if (result instanceof Error) throw result
+    return result
+  }
+
   /** Top `count` players by MMR; `count = 0` fetches the whole leaderboard. */
   async fetchLeaderboard(queueId: string, count: number): Promise<LeaderboardEntry[]> {
     const page = (n: number) => ({
@@ -162,12 +159,7 @@ export class Api {
     })
     type PageResult = { data: LeaderboardEntry[]; totalPages: number }
 
-    const [first] = await this.#trpcBatch<ReturnType<typeof page>, PageResult>(
-      'leaderboard.get_leaderboard',
-      [page(1)]
-    )
-    if (!first || first instanceof Error) throw first ?? new Error('Empty leaderboard response')
-
+    const first = await this.#trpcOne<ReturnType<typeof page>, PageResult>('leaderboard.get_leaderboard', page(1))
     const wantedPages =
       count === 0 ? first.totalPages : Math.min(first.totalPages, Math.ceil(count / LEADERBOARD_PAGE_SIZE))
     const rest = await this.#trpcBatch<ReturnType<typeof page>, PageResult>(
@@ -218,14 +210,24 @@ export class Api {
   /** Total players currently queued, per queue, including ones we don't track. */
   async fetchQueueCounts(): Promise<Map<string, number>> {
     type Count = { queue_id: number; players_in_queue: number }
-    const [result] = await this.#trpcBatch<null, Count[]>('playerState.getActiveMatches', [null])
-    if (!result || result instanceof Error) throw result ?? new Error('Empty active-matches response')
+    const result = await this.#trpcOne<null, Count[]>('playerState.getActiveMatches', null)
     return new Map(result.map((q) => [String(q.queue_id), q.players_in_queue]))
   }
 
-  async fetchRecentMatches(userId: string, limit = 5): Promise<PlayerMatch[]> {
-    const url = `${this.#botlatroUrl}/api/players/${encodeURIComponent(userId)}/matches?limit=${limit}`
-    const res = await this.#get<{ matches: PlayerMatch[] }>(url, 'botlatro')
-    return res.matches
+  async fetchSeasons(): Promise<SiteSeason[]> {
+    return this.#trpcOne<null, SiteSeason[]>('seasons.list', null)
+  }
+
+  /** A player's newest games in a season (`season7`, …), newest first. */
+  async fetchMatchHistory(userId: string, season: string, pageSize: number): Promise<SiteGame[]> {
+    const result = await this.#trpcOne<object, { data: SiteGame[] }>('history.user_games_page', {
+      user_id: userId,
+      season,
+      page: 1,
+      pageSize,
+      sortBy: 'gameTime',
+      sortOrder: 'desc',
+    })
+    return result.data
   }
 }
