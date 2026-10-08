@@ -47,7 +47,10 @@ portal. A deck or stake without an image falls back to 🃏 / 🎲.
 
 A result notification looks like this:
 
-> 🏆 **bacon** (#1 · 1624) beat **Dominater** (#19 · 1200) · 🃏 Yellow Deck · 🎲 Spectral+ Stake · +12.2 for bacon
+> 🏆 **bacon** (#1 · 1624) beat **Dominater** (#19 · 1200) · 🃏 Yellow Deck · 🎲 Spectral+ Stake · +12.2 for bacon · ⏱️ 23 min
+
+In the feed channel, a match's ⚔️ "started" post is removed once the match is over, so the feed
+only shows matches still being played, plus results.
 
 ## Queue-time estimates
 
@@ -143,11 +146,21 @@ On errors it backs off exponentially (up to 5 min) and honors `Retry-After`.
 - **Stuck states.** The site only clears state when NeatQueue's webhook says so. Cancelled matches
   stay "in game" forever (some are days old). States older than `STALE_MATCH_HOURS` /
   `STALE_QUEUE_HOURS` count as idle.
-- **Cancelled games** have no entry in the match history. They're reported as "no recorded result",
-  which is different from "history unavailable" (the site couldn't be reached).
-- **Running games look finished in the history.** The site reports every game as a win or loss, so
-  only a game created between the match's start and its observed end is accepted. That keeps an
-  instant rematch that's still running from being reported as the result.
+- **Cancelled games** have no entry in the match history (it only lists completed games), and the
+  queue bot sends the site nothing when a game is cancelled. How fast that's detected:
+  - **A player requeues or starts another game:** right away. Their game must be closed for that,
+    and results are recorded before a game closes, so one history lookup tells finished from
+    cancelled.
+  - **Nobody requeues:** the site keeps showing them "in game". After a timeout learned from how
+    long completed games take (p99 × 1.25, 30 min to `STALE_MATCH_HOURS`; `MATCH_TIMEOUT_MINUTES`
+    until there's enough data) it's reported as "no result (likely cancelled)". If it was just a
+    long game and finishes later, the result is still posted, marked "finished after all".
+  - The other player of a cancelled game stops showing as "in game" as soon as the game is known to
+    be over.
+- **"No result" vs "result unavailable":** the first means the site answered without the game, the
+  second that the site couldn't be reached.
+- **Rematches.** Only a game created between the match's start and its observed end is accepted as
+  its result, so a later game against the same opponent is never mistaken for it.
 - **Restarts.** The first observation of every player is a silent baseline. Running matches are still
   tracked so their results get reported, but they aren't re-announced.
 

@@ -51,6 +51,8 @@ export function loadConfig() {
     warmWindowMs: num('WARM_WINDOW_HOURS', 2, 0) * 3_600_000,
     leaderboardRefreshMs: num('LEADERBOARD_REFRESH_MINUTES', 10, 5) * 60_000,
     staleMatchMs: num('STALE_MATCH_HOURS', 3, 0.5) * 3_600_000,
+    /** Fallback match timeout until enough completed matches have been seen to learn one. */
+    matchTimeoutMs: num('MATCH_TIMEOUT_MINUTES', 90, 15) * 60_000,
     staleQueueMs: num('STALE_QUEUE_HOURS', 2, 0.5) * 3_600_000,
 
     matchmaking: {

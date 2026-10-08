@@ -8,6 +8,7 @@ import {
   escapeMarkdown,
   GatewayIntentBits,
   InteractionContextType,
+  type Message,
   MessageFlags,
   SlashCommandBuilder,
   type SlashCommandStringOption,
@@ -196,13 +197,28 @@ export class Bot {
     }
   }
 
-  async #feed(content: string) {
-    if (!this.#cfg.feedChannelId) return
+  async #feed(content: string): Promise<Message | undefined> {
+    if (!this.#cfg.feedChannelId) return undefined
     try {
       const channel = await this.client.channels.fetch(this.#cfg.feedChannelId)
-      if (channel?.isSendable()) await channel.send({ content, allowedMentions: { parse: [] } })
+      if (channel?.isSendable()) return await channel.send({ content, allowedMentions: { parse: [] } })
     } catch (err) {
       console.warn('[bot] feed post failed:', err)
+    }
+    return undefined
+  }
+
+  /** Removes a finished match's "started" post(s) from the feed. */
+  async #removeFeedStart(m: TrackedMatch) {
+    const ids = this.#store.takeFeedMessages(m.players[0], m.players[1], m.startTime)
+    if (!ids.length || !this.#cfg.feedChannelId) return
+    try {
+      const channel = await this.client.channels.fetch(this.#cfg.feedChannelId)
+      if (!channel?.isTextBased() || channel.isDMBased()) return
+      // Deleting our own messages needs no extra permission; one already gone is fine.
+      await Promise.all(ids.map((id) => channel.messages.delete(id).catch(() => {})))
+    } catch (err) {
+      console.warn('[bot] removing feed post failed:', err)
     }
   }
 
@@ -288,7 +304,7 @@ export class Bot {
     this.#store.logMatchStart(a, b, m.startTime)
     await this.#named(m.players, 5_000)
     const msg = `⚔️ ${this.#label(a)} vs ${this.#label(b)} · started ${ts(m.startTime)}${m.late ? ' (seen late)' : ''}.`
-    await Promise.all([
+    const [, posted] = await Promise.all([
       this.#notify(
         m.players,
         // Queue-only subscribers still hear about it if the queue phase was
@@ -298,11 +314,18 @@ export class Bot {
       ),
       this.#featured(m.players) && !m.late ? this.#feed(msg) : undefined,
     ])
+    if (posted) {
+      this.#store.addFeedMessage(a, b, m.startTime, posted.id)
+      // Over before the post went out (e.g. cancelled within seconds): remove it right away.
+      if (m.resultReported) await this.#removeFeedStart(m)
+    }
   }
 
   async #onMatchResult(m: TrackedMatch, outcome: MatchOutcome) {
     const [a, b] = m.players
     const ended = m.endedAt ?? Date.now()
+    m.resultReported = true
+    void this.#removeFeedStart(m)
     await this.#named(m.players, 5_000)
     let msg: string
     if (outcome.status !== 'found') {
@@ -319,10 +342,13 @@ export class Bot {
         r.deck && `${this.#emojis.get('deck', r.deck)} ${r.deck}`,
         r.stake && `${this.#emojis.get('stake', r.stake)} ${r.stake}`,
         change,
+        // Start → when we saw it end (within a poll interval of the real end).
+        `⏱️ ${formatDuration(ended - m.startTime)}`,
       ]
         .filter(Boolean)
         .join(' · ')
-      msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)} · ${details}`
+      // A timed-out match we'd reported as "no result" that did finish after all.
+      msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)} · ${details}${m.lateResult ? ' · (finished after all)' : ''}`
     }
     await Promise.all([
       this.#notify(m.players, (mask) => (mask & Notify.result) !== 0, msg),

@@ -5,18 +5,30 @@ import { Store } from './db.ts'
 import { Directory } from './directory.ts'
 import { Predictor } from './predict.ts'
 import { ResultSource } from './results.ts'
-import { Tracker } from './tracker.ts'
+import { adaptiveMatchTimeout, Tracker } from './tracker.ts'
 
 const config = loadConfig()
 const store = new Store(config.dbPath)
 const api = new Api(config)
 const results = new ResultSource(api)
+
+// Learned from completed matches; recomputed at most every 10 minutes.
+let matchTimeout = { ms: 0, at: 0 }
+const matchTimeoutMs = () => {
+  if (Date.now() - matchTimeout.at > 10 * 60_000) {
+    const ms = adaptiveMatchTimeout(store.completedDurations(), config.matchTimeoutMs, config.staleMatchMs)
+    matchTimeout = { ms, at: Date.now() }
+  }
+  return matchTimeout.ms
+}
+
 const tracker = new Tracker({
   api,
   config,
   isWatched: (id) => store.isWatched(id),
   hasConsumers: () => Boolean(config.feedChannelId) || store.hasAnySubscriptions(),
   history: (id) => results.history(id),
+  matchTimeoutMs,
 })
 const directory = new Directory({ api, tracker, queueId: config.queueId })
 const predictor = new Predictor({ api, config, store, tracker, directory })

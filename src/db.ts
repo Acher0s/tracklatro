@@ -55,6 +55,12 @@ export class Store {
         PRIMARY KEY (player_a, player_b, started_at)
       );
       CREATE INDEX IF NOT EXISTS matches_started ON matches (started_at DESC);
+      CREATE TABLE IF NOT EXISTS feed_messages (
+        player_a   TEXT    NOT NULL,
+        player_b   TEXT    NOT NULL,
+        started_at INTEGER NOT NULL,
+        message_id TEXT    NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS queue_samples (
         gap     REAL    NOT NULL,
         wait_ms INTEGER NOT NULL,
@@ -143,6 +149,17 @@ export class Store {
       .run(a, b, startedAt, endedAt, matchId, winnerId)
   }
 
+  /** How long recent completed matches took (start → observed end), for the match timeout. */
+  completedDurations(limit = 500): number[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT ended_at - started_at AS d FROM matches
+         WHERE winner_id IS NOT NULL AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT ?`
+      )
+      .all(limit) as Array<{ d: number }>
+    return rows.map((r) => r.d).filter((d) => d > 0)
+  }
+
   recentMatches(limit: number, playerId?: string): MatchLogRow[] {
     return (
       playerId
@@ -151,6 +168,30 @@ export class Store {
             .all(playerId, playerId, limit)
         : this.#db.prepare('SELECT * FROM matches ORDER BY started_at DESC LIMIT ?').all(limit)
     ) as MatchLogRow[]
+  }
+
+  // ------------------------------------------------------------ feed messages
+
+  /** Remembers the feed's "match started" post so it can be removed when the match is over. */
+  addFeedMessage(a: string, b: string, startedAt: number, messageId: string) {
+    this.#db
+      .prepare('INSERT INTO feed_messages (player_a, player_b, started_at, message_id) VALUES (?, ?, ?, ?)')
+      .run(a, b, startedAt, messageId)
+  }
+
+  /**
+   * Removes and returns the start post(s) of a match. Matched with a little
+   * slack on the start time: the two players' views of it differ by a few ms,
+   * and a restart may re-learn it from the other player.
+   */
+  takeFeedMessages(a: string, b: string, startedAt: number, slackMs = 2 * 60_000): string[] {
+    const where = 'player_a = ? AND player_b = ? AND started_at BETWEEN ? AND ?'
+    const args = [a, b, startedAt - slackMs, startedAt + slackMs] as const
+    const rows = this.#db.prepare(`SELECT message_id FROM feed_messages WHERE ${where}`).all(...args) as Array<{
+      message_id: string
+    }>
+    this.#db.prepare(`DELETE FROM feed_messages WHERE ${where}`).run(...args)
+    return rows.map((r) => r.message_id)
   }
 
   // ------------------------------------------------------- matchmaking samples

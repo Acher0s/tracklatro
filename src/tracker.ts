@@ -35,6 +35,14 @@ export type TrackedMatch = {
   /** Queue join time of players we did see queuing right before this match. */
   queueJoins: Map<string, number>
   endedAt?: number
+  /** Ended by our timeout, not by a state change: it might still be running. */
+  timedOut?: boolean
+  /** Its result arrived after we had already reported "no result" (a timed-out match that did finish). */
+  lateResult?: boolean
+  /** Players the site still shows in this match after we ended it (cancelled matches are never cleared). */
+  lingering?: Set<string>
+  /** Set by the bot once it has announced the outcome. */
+  resultReported?: boolean
 }
 
 export type MatchOutcome =
@@ -56,8 +64,39 @@ type TrackerEvents = {
 
 /** Two observations of the same match from either player differ by a few ms. */
 const SAME_MATCH_TOLERANCE_MS = 2 * 60_000
-/** Retry schedule for looking up a finished match in the site's match history. */
-const RESULT_LOOKUP_DELAYS_MS = [5_000, 30_000, 90_000, 300_000]
+/** Retry schedule for looking up a finished match in the site's match history (first one immediately). */
+const RESULT_LOOKUP_DELAYS_MS = [0, 20_000, 90_000, 300_000]
+
+/**
+ * How a match was seen to end, which decides how sure one history miss makes us.
+ *
+ * The queue bot writes a match's result before it closes the match and tells
+ * the site, and its history only lists completed matches. A player can only
+ * requeue once their match is closed.
+ *  - moved_on: a player requeued or started another match → the match is
+ *    closed, so one miss means it was cancelled.
+ *  - cleared:  the site cleared their state, which only happens for completed
+ *    matches → found right away; a second look is just a safety net.
+ *  - timeout:  it still shows as running but has gone on too long → likely
+ *    cancelled (never cleared on the site); two misses settle it.
+ */
+export type EndReason = 'moved_on' | 'cleared' | 'timeout'
+const MISSES_FOR_NOT_FOUND: Record<EndReason, number> = { moved_on: 1, cleared: 2, timeout: 2 }
+
+/**
+ * When to give up on a match that still shows as running: cancelled matches
+ * are never cleared on the site. Learned from how long completed matches
+ * actually took (p99 × 1.25, between 30 min and the hard stale limit); until
+ * there are enough of those, the configured fallback.
+ */
+export function adaptiveMatchTimeout(durationsMs: number[], fallbackMs: number, maxMs: number): number {
+  const MIN_SAMPLES = 30
+  const MIN_MS = 30 * 60_000
+  if (durationsMs.length < MIN_SAMPLES) return Math.min(fallbackMs, maxMs)
+  const sorted = [...durationsMs].sort((a, b) => a - b)
+  const p99 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))]!
+  return Math.min(maxMs, Math.max(MIN_MS, p99 * 1.25))
+}
 const MAX_BACKOFF_MS = 5 * 60_000
 
 /**
@@ -81,6 +120,9 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   readonly #isWatched: (id: string) => boolean
   readonly #hasConsumers: () => boolean
   readonly #history: (userId: string) => Promise<MatchRecord[]>
+  readonly #matchTimeoutMs: () => number
+  /** Matches we ended that the site may still show as running (see TrackedMatch.lingering). */
+  readonly #ended = new Set<TrackedMatch>()
   #timers = new Set<NodeJS.Timeout>()
   #pollFailures = 0
   #stopped = false
@@ -95,6 +137,8 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     hasConsumers: () => boolean
     /** A player's recent match history, for looking up results. */
     history?: (userId: string) => Promise<MatchRecord[]>
+    /** How long a match may show as running before we treat it as over (see adaptiveMatchTimeout). */
+    matchTimeoutMs?: () => number
   }) {
     super()
     this.#api = opts.api
@@ -102,6 +146,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     this.#isWatched = opts.isWatched
     this.#hasConsumers = opts.hasConsumers
     this.#history = opts.history ?? (async () => [])
+    this.#matchTimeoutMs = opts.matchTimeoutMs ?? (() => this.#cfg.staleMatchMs)
     this.#warmTop = this.#cfg.topN === 0 ? 100 : this.#cfg.topN
   }
 
@@ -240,13 +285,12 @@ export class Tracker extends EventEmitter<TrackerEvents> {
       // Snapshots are outdated; re-baseline instead of inventing transitions.
       for (const p of this.players.values()) p.snapshot = undefined
       this.activeMatches.clear()
+      this.#ended.clear()
       this.paused = false
       console.log('[tracker] resuming state polling')
     }
 
-    for (const m of this.activeMatches) {
-      if (now - m.startTime > this.#cfg.staleMatchMs) this.#endMatch(m, now)
-    }
+    this.checkTimeouts(now)
 
     const ids = this.selectBatch(now)
     if (ids.length === 0) return
@@ -256,13 +300,43 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     this.observe(states, now)
   }
 
+  /** Ends matches that have shown as running for too long (cancelled ones are never cleared on the site). */
+  checkTimeouts(now: number) {
+    const timeoutMs = this.#matchTimeoutMs()
+    for (const m of this.activeMatches) {
+      if (now - m.startTime > timeoutMs) this.#endMatch(m, now, 'timeout')
+    }
+    for (const m of this.#ended) {
+      if (now - m.startTime > this.#cfg.staleMatchMs) this.#ended.delete(m)
+    }
+  }
+
   /** Applies one round of observations. Public so it can be driven in tests. */
   observe(states: Map<string, Parameters<typeof normalize>[0]>, now: number) {
     const started = new Set<TrackedMatch>()
 
     for (const [id, remote] of states) {
       const p = this.#player(id)
-      const next = normalize(remote, now, this.#cfg)
+      const shown = normalize(remote, now, this.#cfg)
+      let next = shown
+      // The site never clears cancelled matches, so it can keep showing a
+      // match we already ended (the opponent moved on, or it timed out).
+      for (const m of this.#ended) {
+        if (!m.lingering?.has(id)) continue
+        if (shown.kind === 'in_game' && this.#isMatch(m, id, shown.opponentId, shown.startTime)) {
+          next = { kind: 'idle' } // over: don't keep them "in game" or re-announce it
+          continue
+        }
+        // The site moved on from it for this player.
+        m.lingering.delete(id)
+        if (m.lingering.size === 0) this.#ended.delete(m)
+        if (m.timedOut && !m.lateResult) {
+          // We gave up on it, yet it really ended now: it may have finished after all.
+          m.lateResult = true
+          m.endedAt = now
+          this.#lookupResult(m, shown.kind === 'idle' ? 'cleared' : 'moved_on', { onlyIfFound: true })
+        }
+      }
       const prev = p.snapshot
       p.snapshot = next
       p.lastPolledAt = now
@@ -295,7 +369,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
             p.hotUntil = now + this.#cfg.hotCooldownMs
             p.lastActiveAt = now
             const m = this.#findMatch(id, t.opponentId, t.startTime)
-            if (m) this.#endMatch(m, now)
+            if (m) this.#endMatch(m, now, next.kind === 'idle' ? 'cleared' : 'moved_on')
             break
           }
         }
@@ -309,15 +383,13 @@ export class Tracker extends EventEmitter<TrackerEvents> {
 
   // ------------------------------------------------------------------ matches
 
+  #isMatch(m: TrackedMatch, a: string, b: string, startTime: number): boolean {
+    return m.players.includes(a) && m.players.includes(b) && Math.abs(m.startTime - startTime) < SAME_MATCH_TOLERANCE_MS
+  }
+
   #findMatch(a: string, b: string, startTime: number): TrackedMatch | undefined {
     for (const m of this.activeMatches) {
-      if (
-        m.players.includes(a) &&
-        m.players.includes(b) &&
-        Math.abs(m.startTime - startTime) < SAME_MATCH_TOLERANCE_MS
-      ) {
-        return m
-      }
+      if (this.#isMatch(m, a, b, startTime)) return m
     }
     return undefined
   }
@@ -339,31 +411,39 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     return m
   }
 
-  #endMatch(m: TrackedMatch, now: number) {
+  #endMatch(m: TrackedMatch, now: number, reason: EndReason) {
     if (!this.activeMatches.delete(m)) return
     m.endedAt = now
+    m.timedOut = reason === 'timeout'
+    m.lingering = new Set(m.players)
+    this.#ended.add(m)
     this.emit('match_end', m)
-    this.#lookupResult(m, 0, false)
+    this.#lookupResult(m, reason)
   }
 
-  #lookupResult(m: TrackedMatch, attempt: number, reachedHistory: boolean) {
+  /**
+   * Looks the match up in the history until it's found, or until enough clean
+   * misses for this end reason say there is no result. `onlyIfFound`: a
+   * second-chance lookup that stays silent unless the result turns up.
+   */
+  #lookupResult(m: TrackedMatch, reason: EndReason, opts: { onlyIfFound?: boolean } = {}, attempt = 0, misses = 0) {
     const delay = RESULT_LOOKUP_DELAYS_MS[attempt]
-    if (delay === undefined) {
-      this.emit('match_result', m, { status: reachedHistory ? 'not_found' : 'unavailable' })
+    if (delay === undefined || misses >= MISSES_FOR_NOT_FOUND[reason]) {
+      if (!opts.onlyIfFound) this.emit('match_result', m, { status: misses > 0 ? 'not_found' : 'unavailable' })
       return
     }
     this.#later(delay, async () => {
       try {
         const result = findResult(await this.#history(m.players[0]), m)
-        reachedHistory = true
         if (result) {
           this.emit('match_result', m, { status: 'found', result })
           return
         }
+        misses++
       } catch (err) {
         console.error('[tracker] result lookup failed:', describe(err))
       }
-      this.#lookupResult(m, attempt + 1, reachedHistory)
+      this.#lookupResult(m, reason, opts, attempt + 1, misses)
     })
   }
 }

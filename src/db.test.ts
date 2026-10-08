@@ -21,6 +21,16 @@ test('subscriptions merge kinds, partially unsubscribe, and stay cached', () => 
   store.close()
 })
 
+test('feed start posts are found with start-time slack and only taken once', () => {
+  const store = new Store(':memory:')
+  store.addFeedMessage('a', 'b', 100_000, 'msg1')
+  store.addFeedMessage('a', 'c', 100_000, 'other')
+  assert.deepEqual(store.takeFeedMessages('a', 'b', 100_050), ['msg1']) // other player's view: a few ms off
+  assert.deepEqual(store.takeFeedMessages('a', 'b', 100_050), [])
+  assert.deepEqual(store.takeFeedMessages('a', 'c', 100_000 + 10 * 60_000), []) // a different (later) match
+  store.close()
+})
+
 test('match log upserts results onto started matches', () => {
   const store = new Store(':memory:')
   store.logMatchStart('a', 'b', 100)

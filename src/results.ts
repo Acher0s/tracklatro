@@ -33,10 +33,8 @@ const CLOCK_SLACK_MS = 60_000
 /**
  * Finds the history entry for a tracked match, from the perspective of
  * `m.players[0]`. It must be against the right opponent and created within the
- * match's lifetime. The site reports every game as a win or loss, even one
- * still running, so anything created after we saw the match end is a later
- * game (e.g. an instant rematch) and must be skipped. Among the rest, the
- * newest (highest id) wins.
+ * match's lifetime: anything created after we saw the match end is a later
+ * game (e.g. a rematch). Among the rest, the newest (highest id) wins.
  */
 export function findResult(history: MatchRecord[], m: TrackedMatch): MatchRecord | null {
   const opponent = m.players[1]
