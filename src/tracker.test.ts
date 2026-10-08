@@ -1,0 +1,159 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import type { Api, LeaderboardEntry, PlayerMatch, RemotePlayerState } from './api.ts'
+import type { Config } from './config.ts'
+import { findResult, type TrackedMatch, Tracker } from './tracker.ts'
+
+const config = {
+  topN: 100,
+  hotIntervalMs: 10_000,
+  warmIntervalMs: 30_000,
+  hotCooldownMs: 10 * 60_000,
+  warmWindowMs: 2 * 3_600_000,
+  staleMatchMs: 3 * 3_600_000,
+  staleQueueMs: 2 * 3_600_000,
+} as Config
+
+function makeTracker(watched: string[] = [], cfg: Partial<Config> = {}) {
+  const tracker = new Tracker({
+    api: {} as Api,
+    config: { ...config, ...cfg },
+    isWatched: (id) => watched.includes(id),
+    hasConsumers: () => true,
+  })
+  const events: string[] = []
+  tracker.on('queue_join', (e) => events.push(`join ${e.playerId}`))
+  tracker.on('queue_leave', (e) => events.push(`leave ${e.playerId}`))
+  tracker.on('match_start', (m) =>
+    events.push(`start ${m.players.join('-')}${m.unseenQueue.size ? ` unseen:${[...m.unseenQueue].join(',')}` : ''}`)
+  )
+  tracker.on('match_end', (m) => events.push(`end ${m.players.join('-')}`))
+  return { tracker, events }
+}
+
+const entry = (id: string, games = 10): LeaderboardEntry => ({
+  id,
+  name: id,
+  mmr: 1000,
+  wins: games,
+  losses: 0,
+  streak: 0,
+  rank: 0,
+  winrate: 1,
+})
+
+const states = (o: Record<string, RemotePlayerState | null>) => new Map(Object.entries(o))
+const inGame = (opponentId: string, startTime: number): RemotePlayerState => ({
+  status: 'in_game',
+  currentMatch: { opponentId, startTime },
+})
+
+test('first observation is a silent baseline; running matches are still tracked', () => {
+  const { tracker, events } = makeTracker()
+  tracker.observe(states({ a: inGame('b', 1000), b: inGame('a', 1001), c: null }), 2000)
+  assert.deepEqual(events, [])
+  assert.equal(tracker.activeMatches.size, 1)
+})
+
+test('a match seen from both players is announced once, after both views merge', () => {
+  const { tracker, events } = makeTracker()
+  tracker.observe(states({ a: null, b: null }), 0)
+  tracker.observe(states({ a: { status: 'queuing', queueStartTime: 1 }, b: null }), 2)
+  tracker.observe(states({ a: inGame('b', 50), b: inGame('a', 52) }), 60)
+  // a was seen queuing, b went idle → in game within one poll.
+  assert.deepEqual(events, ['join a', 'start a-b unseen:b'])
+
+  tracker.observe(states({ a: null, b: null }), 70)
+  assert.deepEqual(events.slice(2), ['end a-b'])
+  tracker.stop()
+})
+
+test('instant rematch ends the old match and starts a new one', () => {
+  const { tracker, events } = makeTracker()
+  tracker.observe(states({ a: inGame('b', 1000) }), 1000)
+  tracker.observe(states({ a: inGame('b', 10 * 60_000) }), 10 * 60_000)
+  assert.deepEqual(events, ['end a-b', 'start a-b unseen:a'])
+  assert.equal(tracker.activeMatches.size, 1)
+  tracker.stop()
+})
+
+test('opponents are heated so they get polled next tick', () => {
+  const { tracker } = makeTracker()
+  tracker.observe(states({ a: null }), 0)
+  tracker.observe(states({ a: inGame('z', 5) }), 10)
+  const z = tracker.players.get('z')
+  assert.ok(z)
+  assert.equal(tracker.tier(z, 20), 'hot')
+  tracker.stop()
+})
+
+test('tiers: hot / warm (top, watched, recently active) / cold', () => {
+  const { tracker } = makeTracker(['w'], { topN: 0 })
+  const now = 1_000_000
+  const lb = [entry('top')]
+  for (let i = 0; i < 150; i++) lb.push(entry(`p${i}`))
+  lb.push(entry('w'))
+  tracker.applyLeaderboard(lb, now)
+  const tierOf = (id: string) => tracker.tier(tracker.players.get(id)!, now)
+  assert.equal(tierOf('top'), 'warm') // rank 1
+  assert.equal(tierOf('p140'), 'cold') // rank > 100
+  assert.equal(tierOf('w'), 'warm') // subscribed
+  // p140 finishes a game → leaderboard game count goes up → warm.
+  lb[141] = entry('p140', 11)
+  tracker.applyLeaderboard(lb, now + 60_000)
+  assert.equal(tracker.tier(tracker.players.get('p140')!, now + 60_000), 'warm')
+  tracker.observe(states({ p0: { status: 'queuing', queueStartTime: now } }), now)
+  assert.equal(tierOf('p0'), 'hot')
+})
+
+test('selectBatch only requests when something is due, and fills spare slots with the stalest players', () => {
+  const { tracker } = makeTracker([], { topN: 0 })
+  const lb = Array.from({ length: 300 }, (_, i) => entry(`p${i}`))
+  tracker.applyLeaderboard(lb, 0)
+  // Everyone just polled.
+  tracker.observe(new Map(lb.map((e) => [e.id, null])), 1_000_000)
+  assert.deepEqual(tracker.selectBatch(1_005_000), [])
+
+  // One hot player due → one full request of 100, rotating cold players in.
+  tracker.observe(states({ p250: { status: 'queuing', queueStartTime: 1_000_000 } }), 1_000_000)
+  const batch = tracker.selectBatch(1_010_000)
+  assert.equal(batch.length, 100)
+  assert.equal(batch[0], 'p250')
+
+  // 30s later the top-100 warm players are due too: 101 due → 2 requests' worth.
+  assert.equal(tracker.selectBatch(1_030_000).length, 200)
+})
+
+test('findResult picks the newest completed match against the opponent', () => {
+  const m: TrackedMatch = { players: ['a', 'b'], startTime: Date.parse('2026-10-08T10:00:00Z'), detectedAt: 0, late: false, unseenQueue: new Set(), queueJoins: new Map() }
+  const h = (match_id: number, created_at: string, opp: string, winning_team: number | null = 1): PlayerMatch => ({
+    match_id,
+    created_at,
+    winning_team,
+    opponents: [{ user_id: opp, name: opp, team: 2, elo_change: -10, mmr_after: 990 }],
+    player_name: 'a',
+    player_id: 'a',
+    queue_id: 1,
+    mmr_after: 1010,
+    won: true,
+    elo_change: 10,
+    team: 1,
+    deck: null,
+    stake: null,
+    best_of_3: false,
+    best_of_5: false,
+  })
+  assert.equal(
+    findResult(
+      [
+        h(5, '2026-10-08T10:20:00Z', 'b', null), // still running → ignore
+        h(4, '2026-10-08T10:00:01Z', 'b'),
+        h(3, '2026-10-08T09:30:00Z', 'b'), // earlier game vs same opponent
+        h(2, '2026-10-08T10:00:05Z', 'c'),
+      ],
+      m
+    )?.match_id,
+    4
+  )
+  assert.equal(findResult([h(3, '2026-10-08T09:30:00Z', 'b')], m), null) // cancelled
+})

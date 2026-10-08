@@ -1,0 +1,23 @@
+{
+  "name": "tracklatro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Discord bot that tracks Balatro Multiplayer queue states for top players and DMs subscribers.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.ts",
+    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/index.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
