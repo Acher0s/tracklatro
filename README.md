@@ -52,6 +52,10 @@ A result notification looks like this:
 In the feed channel, a match's ⚔️ "started" post is removed once the match is over, so the feed
 only shows matches still being played, plus results.
 
+"Queued" posts (feed and DMs) are edited as the session goes on: 🟢 while queuing, 🟡 once the
+player is in a match, ⚪ when the match is over or they left the queue. A restart picks up where
+it left off.
+
 ## Queue-time estimates
 
 When a player someone follows joins the queue, each subscriber's DM adds a forecast:

@@ -18,6 +18,14 @@ export function describeMask(mask: number): string {
 
 export type Subscription = { user_id: string; target_id: string; mask: number; created_at: number }
 
+export type QueuePost = {
+  player_id: string
+  channel_id: string
+  message_id: string
+  content: string
+  stage: string
+}
+
 export type MatchLogRow = {
   player_a: string
   player_b: string
@@ -61,6 +69,14 @@ export class Store {
         started_at INTEGER NOT NULL,
         message_id TEXT    NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS queue_posts (
+        player_id  TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        stage      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS queue_posts_player ON queue_posts (player_id);
       CREATE TABLE IF NOT EXISTS queue_samples (
         gap     REAL    NOT NULL,
         wait_ms INTEGER NOT NULL,
@@ -192,6 +208,35 @@ export class Store {
     }>
     this.#db.prepare(`DELETE FROM feed_messages WHERE ${where}`).run(...args)
     return rows.map((r) => r.message_id)
+  }
+
+  // -------------------------------------------------------------- queue posts
+
+  /** A "queued" message (feed or DM) whose color follows the player's queue session. */
+  addQueuePost(post: QueuePost) {
+    this.#db
+      .prepare('INSERT INTO queue_posts (player_id, channel_id, message_id, content, stage) VALUES (?, ?, ?, ?, ?)')
+      .run(post.player_id, post.channel_id, post.message_id, post.content, post.stage)
+  }
+
+  queuePosts(playerId: string): QueuePost[] {
+    return this.#db.prepare('SELECT * FROM queue_posts WHERE player_id = ?').all(playerId) as QueuePost[]
+  }
+
+  setQueuePostStage(messageId: string, stage: string) {
+    this.#db.prepare('UPDATE queue_posts SET stage = ? WHERE message_id = ?').run(stage, messageId)
+  }
+
+  /** Forgets a queue post (its session is over). */
+  deleteQueuePost(messageId: string) {
+    this.#db.prepare('DELETE FROM queue_posts WHERE message_id = ?').run(messageId)
+  }
+
+  /** Players with posts still being followed (to reconcile after a restart). */
+  queuePostPlayers(): string[] {
+    return (this.#db.prepare('SELECT DISTINCT player_id FROM queue_posts').all() as Array<{ player_id: string }>).map(
+      (r) => r.player_id
+    )
   }
 
   // ------------------------------------------------------- matchmaking samples

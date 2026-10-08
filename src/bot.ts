@@ -20,6 +20,7 @@ import { describeMask, NOTIFY_ALL, Notify, type NotifyKind, type Store } from '.
 import { formatDuration } from './matchmaking.ts'
 import type { Directory } from './directory.ts'
 import { Emojis } from './emoji.ts'
+import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
@@ -83,6 +84,8 @@ export class Bot {
   readonly #predictor: Predictor
   readonly #directory: Directory
   readonly #emojis = new Emojis()
+  /** 🟢/🟡/⚪ color of "queued" posts, following each player's queue session. */
+  readonly #queuePosts: QueuePosts
   readonly #startedAt = Date.now()
 
   constructor(opts: {
@@ -99,6 +102,9 @@ export class Bot {
     this.#api = opts.api
     this.#predictor = opts.predictor
     this.#directory = opts.directory
+    this.#queuePosts = new QueuePosts(this.#store, (channelId, messageId, content) =>
+      this.#editMessage(channelId, messageId, content)
+    )
     // Players who aren't ranked this season still have a Discord name.
     this.#directory.discordName = async (id) => {
       const user = await this.client.users.fetch(id)
@@ -131,6 +137,7 @@ export class Bot {
     this.#tracker.on('queue_leave', (e) => void this.#onQueueLeave(e.playerId, e.since))
     this.#tracker.on('match_start', (m) => void this.#onMatchStart(m))
     this.#tracker.on('match_result', (m, r) => void this.#onMatchResult(m, r))
+    this.#tracker.once('round', () => void this.#queuePosts.reconcile((id) => this.#player(id)?.snapshot?.kind))
   }
 
   async start() {
@@ -188,12 +195,23 @@ export class Bot {
 
   // ----------------------------------------------------------- notifications
 
-  async #dm(userId: string, content: string) {
+  async #dm(userId: string, content: string): Promise<Message | undefined> {
     try {
-      await this.client.users.send(userId, { content, allowedMentions: { parse: [] } })
+      return await this.client.users.send(userId, { content, allowedMentions: { parse: [] } })
     } catch (err) {
       const reason = err instanceof DiscordAPIError && err.code === 50007 ? 'DMs closed' : String(err)
       console.warn(`[bot] could not DM ${userId}: ${reason}`)
+      return undefined
+    }
+  }
+
+  async #editMessage(channelId: string, messageId: string, content: string) {
+    try {
+      const channel = await this.client.channels.fetch(channelId)
+      if (channel?.isTextBased()) await channel.messages.edit(messageId, { content, allowedMentions: { parse: [] } })
+    } catch (err) {
+      // Deleted by someone, or DMs closed since: nothing to recolor.
+      console.warn(`[bot] couldn't edit message ${messageId}:`, err instanceof Error ? err.message : err)
     }
   }
 
@@ -238,6 +256,7 @@ export class Bot {
   }
 
   async #onQueueLeave(playerId: string, since: number) {
+    void this.#queuePosts.left(playerId)
     const queuedMs = Date.now() - since
     // A queue state that went stale was expired by us, not left by the player.
     if (queuedMs >= this.#cfg.staleQueueMs) return
@@ -250,8 +269,9 @@ export class Bot {
   }
 
   async #onQueueJoin(playerId: string, since: number) {
+    void this.#queuePosts.joined(playerId)
     await this.#named([playerId], 5_000)
-    const msg = `🟢 ${this.#label(playerId)} queued ${ts(since)}.`
+    const msg = `${QUEUE_STAGE_EMOJI.queuing} ${this.#label(playerId)} queued ${ts(since)}.`
     const recipients = this.#recipients([playerId], (mask) => (mask & Notify.queue) !== 0)
     // Forecasts only cost requests when someone will actually read them.
     const forecast = recipients.size
@@ -260,12 +280,16 @@ export class Bot {
           return null
         })
       : null
-    await Promise.all([
+    const sent = await Promise.all([
       ...[...recipients].map((userId) =>
         this.#dm(userId, forecast ? [msg, ...this.#forecastLines(forecast.base, forecast.viewers.get(userId))].join('\n') : msg)
       ),
       this.#featured([playerId]) ? this.#feed(msg) : undefined,
     ])
+    await this.#queuePosts.posted(
+      playerId,
+      sent.filter((m): m is Message => m !== undefined)
+    )
   }
 
   // ---------------------------------------------------------------- forecasts
@@ -300,6 +324,7 @@ export class Bot {
   }
 
   async #onMatchStart(m: TrackedMatch) {
+    for (const p of m.players) void this.#queuePosts.matched(p)
     const [a, b] = m.players
     this.#store.logMatchStart(a, b, m.startTime)
     await this.#named(m.players, 5_000)
@@ -326,6 +351,7 @@ export class Bot {
     const ended = m.endedAt ?? Date.now()
     m.resultReported = true
     void this.#removeFeedStart(m)
+    for (const p of m.players) void this.#queuePosts.matchOver(p)
     await this.#named(m.players, 5_000)
     let msg: string
     if (outcome.status !== 'found') {
