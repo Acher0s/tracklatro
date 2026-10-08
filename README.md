@@ -47,14 +47,13 @@ portal. A deck or stake without an image falls back to 🃏 / 🎲.
 
 A result notification looks like this:
 
-> 🏆 **bacon** (#1 · 1624) beat **Dominater** (#19 · 1200)
-> 🃏 Yellow Deck · 🎲 Spectral+ Stake · +12.2 for bacon
+> 🏆 **bacon** (#1 · 1624) beat **Dominater** (#19 · 1200) · 🃏 Yellow Deck · 🎲 Spectral+ Stake · +12.2 for bacon
 
 ## Queue-time estimates
 
 When a player someone follows joins the queue, each subscriber's DM adds a forecast:
 
-> 🟡 **bacon** (#1 · 1624) queued 3 seconds ago.
+> 🟢 **bacon** (#1 · 1624) queued 3 seconds ago.
 > 🔮 Likely vs **yenn** (#2 · 1554) in ~4s · 1 other visible in queue (+1 I can't see).
 > 🎯 If you queued now, you'd be in range in ~1 min (gap 144), but they'd likely be paired with **yenn** first (~4s).
 

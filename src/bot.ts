@@ -228,7 +228,7 @@ export class Bot {
     // A queue state that went stale was expired by us, not left by the player.
     if (queuedMs >= this.#cfg.staleQueueMs) return
     await this.#named([playerId], 5_000)
-    const msg = `🚪 ${this.#label(playerId)} left the queue after ${formatDuration(queuedMs)}.`
+    const msg = `🔴 ${this.#label(playerId)} left the queue after ${formatDuration(queuedMs)}.`
     await Promise.all([
       this.#notify([playerId], (mask) => (mask & Notify.queue) !== 0, msg),
       this.#featured([playerId]) ? this.#feed(msg) : undefined,
@@ -237,7 +237,7 @@ export class Bot {
 
   async #onQueueJoin(playerId: string, since: number) {
     await this.#named([playerId], 5_000)
-    const msg = `🟡 ${this.#label(playerId)} queued ${ts(since)}.`
+    const msg = `🟢 ${this.#label(playerId)} queued ${ts(since)}.`
     const recipients = this.#recipients([playerId], (mask) => (mask & Notify.queue) !== 0)
     // Forecasts only cost requests when someone will actually read them.
     const forecast = recipients.size
@@ -324,7 +324,7 @@ export class Bot {
       ]
         .filter(Boolean)
         .join(' · ')
-      msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)}\n${details}`
+      msg = `🏆 ${this.#label(winner)} beat ${this.#label(loser)} · ${details}`
     }
     await Promise.all([
       this.#notify(m.players, (mask) => (mask & Notify.result) !== 0, msg),
@@ -533,7 +533,7 @@ export class Bot {
   #stateLine(id: string): string {
     const s = this.#player(id)?.snapshot
     if (!s) return '❔ not checked yet'
-    if (s.kind === 'queuing') return `🟡 queuing · ${ts(s.since)}`
+    if (s.kind === 'queuing') return `🟢 queuing · ${ts(s.since)}`
     if (s.kind === 'in_game') return `⚔️ vs ${this.#label(s.opponentId)} · ${ts(s.startTime)}`
     return '💤 idle'
   }
