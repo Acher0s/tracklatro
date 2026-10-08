@@ -32,12 +32,20 @@ export function normalize(remote: RemotePlayerState | null, now: number, limits:
   return { kind: 'idle' }
 }
 
+/**
+ * Start times of one match can differ slightly: the two players' states are
+ * written separately, and the queue bot retries webhooks, so a resent
+ * MATCH_STARTED rewrites the state with a new start time a few seconds later.
+ * A real rematch can't start this soon after the previous game did.
+ */
+export const SAME_MATCH_TOLERANCE_MS = 2 * 60_000
+
 function sameMatch(a: Snapshot, b: Snapshot): boolean {
   return (
     a.kind === 'in_game' &&
     b.kind === 'in_game' &&
     a.opponentId === b.opponentId &&
-    a.startTime === b.startTime
+    Math.abs(a.startTime - b.startTime) < SAME_MATCH_TOLERANCE_MS
   )
 }
 

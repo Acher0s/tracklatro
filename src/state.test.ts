@@ -49,8 +49,15 @@ test('match end, re-queue and instant rematch within one poll', () => {
     { type: 'match_end', opponentId: 'b', startTime: 5 },
     { type: 'queue_join', since: 1000 },
   ])
-  assert.deepEqual(transitions(game('b', 5), game('b', 9)), [
+  const rematchAt = 25 * 60_000 // the next game vs the same opponent, after this one
+  assert.deepEqual(transitions(game('b', 5), game('b', rematchAt)), [
     { type: 'match_end', opponentId: 'b', startTime: 5 },
-    { type: 'match_start', opponentId: 'b', startTime: 9, sawQueue: false },
+    { type: 'match_start', opponentId: 'b', startTime: rematchAt, sawQueue: false },
   ])
+})
+
+test('a resent MATCH_STARTED (new start time, seconds later) is the same match', () => {
+  assert.deepEqual(transitions(game('b', 1_000_000), game('b', 1_003_500)), [])
+  // ...but not against someone else.
+  assert.equal(transitions(game('b', 1_000_000), game('c', 1_003_500)).length, 2)
 })

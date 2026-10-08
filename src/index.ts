@@ -5,10 +5,14 @@ import { Store } from './db.ts'
 import { Directory } from './directory.ts'
 import { Predictor } from './predict.ts'
 import { ResultSource } from './results.ts'
+import { applySpeed, isSpeed } from './speed.ts'
 import { adaptiveMatchTimeout, Tracker } from './tracker.ts'
 
 const config = loadConfig()
 const store = new Store(config.dbPath)
+// Polling speed chosen with /setup speed (kept across restarts).
+const savedSpeed = store.getSetting('poll_speed')
+if (isSpeed(savedSpeed)) applySpeed(config, savedSpeed)
 const api = new Api(config)
 const results = new ResultSource(api)
 

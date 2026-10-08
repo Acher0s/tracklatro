@@ -57,6 +57,7 @@ DMs and the live feed, and saved in the database:
 | `/setup roles #channel [streak_role] [tilt_role]` | A role picker with a button per alert role (🔥 **Win-streak alerts**, 😤 **Tilt-queue alerts**) |
 | `/setup streak #channel [min_streak]` | Pings the streak role when someone on a 5+ (or `min_streak`) win streak queues |
 | `/setup tilt #channel [min_losses] [window_minutes]` | Pings the tilt role when someone loses 2+ games back to back, requeuing within 10 min each time |
+| `/setup speed <eco\|normal\|fast>` | How often to poll (see below) |
 | `/setup disable <feature>` · `/setup show` | Turn a feature off · see what's set up |
 
 - **Widgets** are one message each, edited in place when their content changes (at most every 10 s).
@@ -74,6 +75,16 @@ DMs and the live feed, and saved in the database:
 - **The role** must be below the bot's own role, and **mentionable** (or give the bot **Mention
   Everyone**) for pings to notify people. `/setup` warns about both.
 - Like the feed, results and widgets cover the tracked players: the top `TOP_N` plus anyone followed.
+- **Speed** applies right away and is kept across restarts:
+
+  | Speed | Active / idle players polled every | Queue noticed after | Site requests/h (busy / quiet) |
+  | --- | --- | --- | --- |
+  | `eco` | 20 s / 60 s | ~10–60 s | ~180 / ~60 |
+  | `normal` | `HOT_POLL_SECONDS` / `WARM_POLL_SECONDS` (10 s / 30 s) | ~5–30 s | ~360 / ~120 |
+  | `fast` | 5 s / 10 s | ~3–10 s | ~720 / ~360 |
+
+  An idle top player is in the warm tier, so the idle interval decides how quickly their queue is
+  noticed. With the top 100, one request carries everyone, so the cost is about one request per tick.
 
 Deck and stake icons come from `assets/emoji/{decks,stakes}/*.png`. On startup the bot uploads any
 missing ones as **application emojis** (`deck_yellow`, `stake_spectral_plus`, …). These belong to the

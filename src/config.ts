@@ -33,6 +33,8 @@ function bands(raw: string): Array<[number, number]> {
 }
 
 export function loadConfig() {
+  const hotIntervalMs = num('HOT_POLL_SECONDS', 10, 5) * 1000
+  const warmIntervalMs = num('WARM_POLL_SECONDS', 30, 10) * 1000
   return {
     discordToken: str('DISCORD_TOKEN'),
     guildId: optional('DISCORD_GUILD_ID'),
@@ -44,9 +46,13 @@ export function loadConfig() {
     queueId: str('QUEUE_ID', '1'),
     /** 0 = the entire leaderboard. */
     topN: num('TOP_N', 100, 0),
-    // Hard floors so a typo can't turn the bot into a hammer.
-    hotIntervalMs: num('HOT_POLL_SECONDS', 10, 5) * 1000,
-    warmIntervalMs: num('WARM_POLL_SECONDS', 30, 10) * 1000,
+    // Hard floors (5 s / 10 s) so a typo can't turn the bot into a hammer.
+    // These are live values: /setup speed switches them at runtime.
+    hotIntervalMs,
+    warmIntervalMs,
+    /** The "normal" speed preset: what .env configures. */
+    normalSpeed: { hotIntervalMs, warmIntervalMs },
+    speed: 'normal' as 'eco' | 'normal' | 'fast',
     hotCooldownMs: num('HOT_COOLDOWN_MINUTES', 10, 0) * 60_000,
     warmWindowMs: num('WARM_WINDOW_HOURS', 2, 0) * 3_600_000,
     leaderboardRefreshMs: num('LEADERBOARD_REFRESH_MINUTES', 10, 5) * 60_000,

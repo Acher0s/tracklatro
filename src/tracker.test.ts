@@ -68,6 +68,29 @@ test('a match seen from both players is announced once, after both views merge',
   tracker.stop()
 })
 
+test('a match is announced once when its players are seen going in on different polls', () => {
+  const { tracker, events } = makeTracker()
+  tracker.observe(states({ queuer: null, idle: null }), 0)
+  tracker.observe(states({ queuer: { status: 'queuing', queueStartTime: 5_000 } }), 10_000)
+  // The queuer is polled first and is already in the match...
+  tracker.observe(states({ queuer: inGame('idle', 15_000) }), 20_000)
+  // ...the idle player only on a later poll.
+  tracker.observe(states({ queuer: inGame('idle', 15_000), idle: inGame('queuer', 15_000) }), 40_000)
+  assert.deepEqual(events, ['join queuer', 'start idle-queuer'])
+  assert.equal(tracker.activeMatches.size, 1)
+  tracker.stop()
+})
+
+test('a resent MATCH_STARTED webhook (start time shifted by seconds) is not a new match', () => {
+  const { tracker, events } = makeTracker()
+  tracker.observe(states({ a: null, b: null }), 0)
+  tracker.observe(states({ a: inGame('b', 100_000), b: inGame('a', 100_000) }), 110_000)
+  tracker.observe(states({ a: inGame('b', 104_000), b: inGame('a', 104_000) }), 120_000)
+  assert.deepEqual(events, ['start a-b unseen:a,b'])
+  assert.equal(tracker.activeMatches.size, 1)
+  tracker.stop()
+})
+
 test('instant rematch ends the old match and starts a new one', () => {
   const { tracker, events } = makeTracker()
   tracker.observe(states({ a: inGame('b', 1000) }), 1000)

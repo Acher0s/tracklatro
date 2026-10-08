@@ -111,6 +111,7 @@ export class Bot {
     )
     this.#server = new ServerFeatures({
       client: this.client,
+      config: this.#cfg,
       store: this.#store,
       tracker: this.#tracker,
       predictor: this.#predictor,
@@ -577,7 +578,7 @@ export class Bot {
         return reply(
           [
             '**tracklatro** · Balatro MP queue tracker (data from balatromp.com)',
-            `Tracking **${this.#tracker.players.size}** players (${this.#cfg.topN === 0 ? 'whole leaderboard' : `top ${this.#cfg.topN}`} + followed):`,
+            `Tracking **${this.#tracker.players.size}** players (${this.#cfg.topN === 0 ? 'whole leaderboard' : `top ${this.#cfg.topN}`} + followed), speed **${this.#cfg.speed}**:`,
             `• 🔥 ${tiers.hot} hot · every ${this.#cfg.hotIntervalMs / 1000}s`,
             `• 🌤️ ${tiers.warm} warm · every ${this.#cfg.warmIntervalMs / 1000}s`,
             `• 🧊 ${tiers.cold} cold · in spare slots`,

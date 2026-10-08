@@ -18,7 +18,9 @@ import {
   SlashCommandBuilder,
   type SlashCommandChannelOption,
 } from 'discord.js'
+import type { Config } from './config.ts'
 import type { Store } from './db.ts'
+import { applySpeed, describeSpeed, isSpeed } from './speed.ts'
 import type { Predictor } from './predict.ts'
 import type { Tracker } from './tracker.ts'
 import type { MatchOutcome, TrackedMatch } from './tracker.ts'
@@ -48,6 +50,7 @@ const S = {
   tiltChannel: 'tilt_channel',
   tiltMin: 'tilt_min',
   tiltWindow: 'tilt_window_minutes',
+  pollSpeed: 'poll_speed',
 } as const
 
 /** Role picker buttons → the setting holding their role. */
@@ -154,6 +157,22 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
           )
       )
   )
+  .addSubcommand((s) =>
+    s
+      .setName('speed')
+      .setDescription('How often the bot checks for queues and matches (faster = more requests to the site)')
+      .addStringOption((o) =>
+        o
+          .setName('speed')
+          .setDescription('Polling speed')
+          .setRequired(true)
+          .addChoices(
+            { name: 'eco: every 20s / 60s idle (fewest requests)', value: 'eco' },
+            { name: 'normal: every 10s / 30s idle (.env defaults)', value: 'normal' },
+            { name: 'fast: every 5s / 10s idle (quickest notifications)', value: 'fast' }
+          )
+      )
+  )
   .addSubcommand((s) => s.setName('show').setDescription('Show the current setup'))
 
 type WidgetKind = 'matches' | 'queue'
@@ -167,6 +186,7 @@ type WidgetKind = 'matches' | 'queue'
  */
 export class ServerFeatures {
   readonly #client: Client
+  readonly #config: Config
   readonly #store: Store
   readonly #tracker: Tracker
   readonly #predictor: Predictor
@@ -182,6 +202,7 @@ export class ServerFeatures {
 
   constructor(opts: {
     client: Client
+    config: Config
     store: Store
     tracker: Tracker
     predictor: Predictor
@@ -189,6 +210,7 @@ export class ServerFeatures {
     named: (ids: Iterable<string>) => Promise<void>
   }) {
     this.#client = opts.client
+    this.#config = opts.config
     this.#store = opts.store
     this.#tracker = opts.tracker
     this.#predictor = opts.predictor
@@ -409,6 +431,14 @@ export class ServerFeatures {
     const reply = (content: string) => i.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } })
     const sub = i.options.getSubcommand()
 
+    if (sub === 'speed') {
+      const speed = i.options.getString('speed', true)
+      if (!isSpeed(speed)) return reply('Unknown speed.')
+      applySpeed(this.#config, speed)
+      this.#store.setSetting(S.pollSpeed, speed)
+      return reply(`Polling speed set to ${describeSpeed(this.#config, speed)}.`)
+    }
+
     if (sub === 'show') {
       const ch = (key: string) => (this.#store.getSetting(key) ? `<#${this.#store.getSetting(key)}>` : '—')
       const role = (key: string) => (this.#store.getSetting(key) ? `<@&${this.#store.getSetting(key)}>` : '—')
@@ -420,6 +450,7 @@ export class ServerFeatures {
           `**Role picker:** ${ch(S.rolesChannel)}`,
           `**Win-streak pings:** ${ch(S.streakChannel)} · ${role(S.streakRole)} · ${this.#streakMin()}+ wins`,
           `**Tilt-queue pings:** ${ch(S.tiltChannel)} · ${role(S.tiltRole)} · ${this.#tiltMin()}+ losses, requeued within ${this.#tiltWindowMs() / 60_000} min`,
+          `**Polling speed:** ${describeSpeed(this.#config, this.#config.speed)}`,
         ].join('\n')
       )
     }

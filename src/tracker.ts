@@ -3,7 +3,7 @@ import { type Api, HttpError, type LeaderboardEntry, MAX_BATCH_SIZE } from './ap
 import type { Config } from './config.ts'
 import { findResult, type MatchRecord } from './results.ts'
 import type { RecentGame } from './widgets.ts'
-import { normalize, type Snapshot, transitions } from './state.ts'
+import { normalize, SAME_MATCH_TOLERANCE_MS, type Snapshot, transitions } from './state.ts'
 
 export type Tier = 'hot' | 'warm' | 'cold'
 
@@ -38,6 +38,8 @@ export type TrackedMatch = {
   detectedAt: number
   /** True if we only saw it after it was already running (startup / cold rotation). */
   late: boolean
+  /** match_start was emitted for it (at most once). */
+  announced?: boolean
   /** Players whose queue phase we never observed (queue→match within one poll). */
   unseenQueue: Set<string>
   /** Queue join time of players we did see queuing right before this match. */
@@ -69,9 +71,6 @@ type TrackerEvents = {
   /** A poll round was applied (new players may need names). */
   round: []
 }
-
-/** Two observations of the same match from either player differ by a few ms. */
-const SAME_MATCH_TOLERANCE_MS = 2 * 60_000
 /** Retry schedule for looking up a finished match in the site's match history (first one immediately). */
 const RESULT_LOOKUP_DELAYS_MS = [0, 20_000, 90_000, 300_000]
 
@@ -386,7 +385,12 @@ export class Tracker extends EventEmitter<TrackerEvents> {
             const m = this.#registerMatch(id, t.opponentId, t.startTime, now, false)
             if (!t.sawQueue) m.unseenQueue.add(id)
             else if (prev.kind === 'queuing') m.queueJoins.set(id, prev.since)
-            started.add(m)
+            // Once per match: the two players are often seen going in on
+            // different polls (e.g. one was queuing and polled more often).
+            if (!m.announced) {
+              m.announced = true
+              started.add(m)
+            }
             this.heat(t.opponentId, now)
             break
           }
