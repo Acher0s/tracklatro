@@ -61,7 +61,8 @@ the "match found" message, because from their point of view that player did queu
   its neighbours (± 1 h, wrapping around midnight) and is shrunk toward the player's overall win rate
   by 10 virtual games: `(wins + 10 × avg) / (games + 10)`. Hours with fewer than 5 pooled games show
   `·`. The summary line gives the best and worst hour and the current one, relative to their average.
-- **Decks, best to worst,** without Cocktail Deck, with win rate and game count. They're ranked by the
+- **Decks and stakes, best to worst,** without Cocktail Deck and without Red, Orange and Blue Stake,
+  with win rate and game count. They're ranked by the
   same shrunk win rate, so a deck won once doesn't outrank one at 75% over a hundred games.
 - **You vs them:** your record against that player, if you play ranked.
 

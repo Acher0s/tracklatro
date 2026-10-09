@@ -53,7 +53,7 @@ export type PlayerStats = {
   durationSamples: number
   /** Best → worst (small samples weighted toward their average, see rankGroups); Cocktail Deck left out. */
   decks: GroupStats[]
-  /** Best → worst, like decks. */
+  /** Best → worst, like decks; Red, Orange and Blue Stake left out. */
   stakes: GroupStats[]
   /** The viewer's own record against this player, from the viewer's side. */
   vsViewer?: { wins: number; losses: number; winrate: number }
@@ -63,6 +63,8 @@ export type PlayerStats = {
 }
 
 const rate = (wins: number, games: number) => (games ? wins / games : 0)
+/** Stakes left out of the stake stats. */
+const IGNORED_STAKES = /^(red|orange|blue)( stake)?$/i
 /** Virtual games at the player's average added to each deck/stake when ranking them. */
 const GROUP_PRIOR_GAMES = 10
 
@@ -92,7 +94,7 @@ export function computeStats(games: GameRow[], durationsMs: number[], viewerId?:
   const wins = decided.filter((g) => g.result === 'win').length
   const overall = rate(wins, decided.length)
   const decks = rankGroups(decided, (g) => (g.deck && !/cocktail/i.test(g.deck) ? g.deck : null), overall)
-  const stakes = rankGroups(decided, (g) => g.stake, overall)
+  const stakes = rankGroups(decided, (g) => (g.stake && !IGNORED_STAKES.test(g.stake) ? g.stake : null), overall)
 
   let vsViewer: PlayerStats['vsViewer']
   if (viewerId) {

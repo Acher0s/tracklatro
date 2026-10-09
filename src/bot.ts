@@ -699,11 +699,14 @@ export class Bot {
 }
 
 /**
- * Characters Discord won't accept in masked-link text (the link then shows as
- * raw markdown): emoji, flags, and invisible formatting characters such as
- * zero-width joiners, variation selectors and bidi controls.
+ * Names that can't safely be masked-link text:
+ *  - emoji, flags and invisible formatting characters (zero-width joiners,
+ *    variation selectors, bidi controls): Discord shows the link as raw markdown;
+ *  - markdown characters: they'd need escaping, but Discord shows backslash
+ *    escapes inside link text literally ("Blued\_"), while unescaped they can
+ *    turn into formatting ("_cool_" in italics).
  */
-const UNLINKABLE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Cf}︀-️]/u
+const UNLINKABLE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Cf}︀-️*_~|`\\]/u
 
 /**
  * "**bacon** (#1 · 1624)" with the name linking to the profile. If the name

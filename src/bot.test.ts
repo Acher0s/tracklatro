@@ -6,7 +6,10 @@ const url = 'https://balatromp.com/players/1'
 
 test('playerLabel links the name when Discord allows it', () => {
   assert.equal(playerLabel('txmldw', url, '#481 · 697'), `[**txmldw**](<${url}>) (#481 · 697)`)
-  assert.equal(playerLabel('a_b*', url), `[**a\\_b\\***](<${url}>)`)
+  // Markdown characters: escaped outside the link (escapes show literally inside link text).
+  assert.equal(playerLabel('Blued_', url, '#596 · 666'), `**Blued\\_** [(#596 · 666)](<${url}>)`)
+  assert.equal(playerLabel('_cool_', url), `**\\_cool\\_** [↗](<${url}>)`)
+  assert.doesNotMatch(playerLabel('Blued_', url), /\[\*\*.*\\_.*\*\*\]/) // never an escape inside link text
   assert.equal(playerLabel('[clan] bob', url), `[**clan bob**](<${url}>)`)
 })
 

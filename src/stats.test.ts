@@ -73,11 +73,13 @@ test('stakes are ranked and shown alongside decks', () => {
   const games: GameRow[] = []
   for (let i = 0; i < 30; i++) games.push({ ...row(i, i % 3 ? 'win' : 'loss', 'Red Deck'), stake: 'White Stake' }) // 67%
   for (let i = 0; i < 30; i++) games.push({ ...row(100 + i, i % 3 ? 'loss' : 'win', 'Red Deck'), stake: 'Gold Stake' }) // 33%
+  for (const stake of ['Red Stake', 'Orange Stake', 'Blue Stake']) games.push({ ...row(500, 'win', 'Red Deck'), stake })
   const s = computeStats(games, [])
   assert.deepEqual(
     s.stakes.map((g) => `${g.name} ${g.wins}/${g.games}`),
-    ['White Stake 20/30', 'Gold Stake 10/30']
+    ['White Stake 20/30', 'Gold Stake 10/30'] // Red, Orange and Blue left out
   )
+  assert.equal(s.games, 63) // still in the overall record
   const text = statsText(s, { deckEmoji: () => '🃏', stakeEmoji: (n) => `<${n}>`, viewerRanked: false, isSelf: true }).description
   assert.ok(
     text.includes('**Stakes** (best → worst; few games count for less)\n<White Stake> `▰▰▰▰▰▰▰▱▱▱` **66.7%** White · 30 games'),
