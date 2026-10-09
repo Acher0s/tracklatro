@@ -40,7 +40,8 @@ export function rowsFromResult(r: MatchRecord, m: TrackedMatch): GameRow[] {
 
 // -------------------------------------------------------------------- stats
 
-export type DeckStats = { deck: string; games: number; wins: number; winrate: number }
+/** Record with one deck or stake. */
+export type GroupStats = { name: string; games: number; wins: number; winrate: number }
 
 export type PlayerStats = {
   games: number
@@ -50,8 +51,10 @@ export type PlayerStats = {
   seasons: number
   avgDurationMs: number | null
   durationSamples: number
-  /** Best → worst (small samples weighted toward their average, see computeStats); Cocktail Deck left out. */
-  decks: DeckStats[]
+  /** Best → worst (small samples weighted toward their average, see rankGroups); Cocktail Deck left out. */
+  decks: GroupStats[]
+  /** Best → worst, like decks. */
+  stakes: GroupStats[]
   /** The viewer's own record against this player, from the viewer's side. */
   vsViewer?: { wins: number; losses: number; winrate: number }
   /** Win rate by hour of the day (see timeOfDay). */
@@ -60,29 +63,36 @@ export type PlayerStats = {
 }
 
 const rate = (wins: number, games: number) => (games ? wins / games : 0)
-/** Virtual games at the player's average added to each deck when ranking decks. */
-const DECK_PRIOR_GAMES = 10
+/** Virtual games at the player's average added to each deck/stake when ranking them. */
+const GROUP_PRIOR_GAMES = 10
+
+/**
+ * Win rate per deck or stake, best → worst. Ranked by win rate shrunk towards
+ * the player's overall one (as for time of day), so a deck won once doesn't
+ * top one with 75% over a hundred games; the real win rate is what's shown.
+ */
+export function rankGroups(decided: GameRow[], key: (g: GameRow) => string | null, overall: number): GroupStats[] {
+  const groups = new Map<string, { games: number; wins: number }>()
+  for (const g of decided) {
+    const name = key(g)
+    if (!name) continue
+    const d = groups.get(name) ?? { games: 0, wins: 0 }
+    d.games++
+    if (g.result === 'win') d.wins++
+    groups.set(name, d)
+  }
+  const ranking = (d: { games: number; wins: number }) => (d.wins + GROUP_PRIOR_GAMES * overall) / (d.games + GROUP_PRIOR_GAMES)
+  return [...groups]
+    .map(([name, d]) => ({ name, ...d, winrate: rate(d.wins, d.games) }))
+    .sort((a, b) => ranking(b) - ranking(a) || b.games - a.games)
+}
 
 export function computeStats(games: GameRow[], durationsMs: number[], viewerId?: string, timeZone = 'UTC'): PlayerStats {
   const decided = games.filter((g) => g.result !== 'tie')
   const wins = decided.filter((g) => g.result === 'win').length
-
-  const byDeck = new Map<string, { games: number; wins: number }>()
-  for (const g of decided) {
-    if (!g.deck || /cocktail/i.test(g.deck)) continue
-    const d = byDeck.get(g.deck) ?? { games: 0, wins: 0 }
-    d.games++
-    if (g.result === 'win') d.wins++
-    byDeck.set(g.deck, d)
-  }
-  // Ranked by win rate shrunk towards their overall one (as for time of day),
-  // so a deck won once doesn't top one with 75% over a hundred games; the
-  // real win rate is what's shown.
   const overall = rate(wins, decided.length)
-  const ranking = (d: { games: number; wins: number }) => (d.wins + DECK_PRIOR_GAMES * overall) / (d.games + DECK_PRIOR_GAMES)
-  const decks = [...byDeck]
-    .map(([deck, d]) => ({ deck, ...d, winrate: rate(d.wins, d.games) }))
-    .sort((a, b) => ranking(b) - ranking(a) || b.games - a.games)
+  const decks = rankGroups(decided, (g) => (g.deck && !/cocktail/i.test(g.deck) ? g.deck : null), overall)
+  const stakes = rankGroups(decided, (g) => g.stake, overall)
 
   let vsViewer: PlayerStats['vsViewer']
   if (viewerId) {
@@ -103,6 +113,7 @@ export function computeStats(games: GameRow[], durationsMs: number[], viewerId?:
     avgDurationMs: durationsMs.length ? durationsMs.reduce((a, b) => a + b, 0) / durationsMs.length : null,
     durationSamples: durationsMs.length,
     decks,
+    stakes,
     vsViewer,
     byHour: timeOfDay(games, timeZone),
     timeZone,
@@ -243,7 +254,13 @@ export function bar(ratio: number, width = 10): string {
  */
 export function statsText(
   s: PlayerStats,
-  opts: { deckEmoji: (deck: string) => string; viewerRanked: boolean; isSelf: boolean; now?: number }
+  opts: {
+    deckEmoji: (deck: string) => string
+    stakeEmoji: (stake: string) => string
+    viewerRanked: boolean
+    isSelf: boolean
+    now?: number
+  }
 ): { description: string; footer: string } {
   if (s.games === 0) return { description: '-# No ranked games found.', footer: 'Ranked · all seasons · balatromp.com' }
   const lines = [
@@ -264,13 +281,16 @@ export function statsText(
   if (chart.length) {
     lines.push('', `**Win rate by time of day** (${s.timeZone}, smoothed)`, '```', ...chart, '```', timeOfDaySummary(s.byHour, nowHour))
   }
-  if (s.decks.length) {
-    lines.push('', '**Decks** (best → worst; few games count for less)')
-    for (const d of s.decks) {
-      const name = d.deck.replace(/ Deck$/, '')
-      lines.push(`${opts.deckEmoji(d.deck)} \`${bar(d.winrate)}\` **${pct(d.winrate)}** ${name} · ${d.games} game${d.games === 1 ? '' : 's'}`)
+  const section = (title: string, groups: GroupStats[], emoji: (name: string) => string, suffix: RegExp) => {
+    if (!groups.length) return
+    lines.push('', `**${title}** (best → worst; few games count for less)`)
+    for (const g of groups) {
+      const games = `${g.games} game${g.games === 1 ? '' : 's'}`
+      lines.push(`${emoji(g.name)} \`${bar(g.winrate)}\` **${pct(g.winrate)}** ${g.name.replace(suffix, '')} · ${games}`)
     }
   }
+  section('Decks', s.decks, opts.deckEmoji, / Deck$/)
+  section('Stakes', s.stakes, opts.stakeEmoji, / Stake$/)
   return {
     description: lines.join('\n'),
     footer: `Ranked · ${s.games} games over ${s.seasons} season${s.seasons === 1 ? '' : 's'} · balatromp.com`,

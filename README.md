@@ -39,6 +39,7 @@ the top players.
 | `/matchup player` | How long until you could queue into them, and who they'd likely get instead |
 | `/recent [player]` | Recently tracked matches with results |
 | `/stats player [public]` | Ranked stats over all seasons (see below) |
+| `/timezone [zone]` | Your time zone for `/stats` (suggestions show each zone's current time) |
 | `/about` | What's tracked and how many requests the bot has made |
 | `/setup …` | Server channels: widgets, results, role picker, win-streak pings (see below) |
 
@@ -53,7 +54,9 @@ the "match found" message, because from their point of view that player did queu
 - **Record and win rate.**
 - **Average game length.** The site's history has no game length, so this only covers ranked games
   the bot watched from start to end, and says how many.
-- **Win rate by time of day,** as a 24-hour chart with ▲ at the current hour, in `STATS_TIMEZONE`.
+- **Win rate by time of day,** as a 24-hour chart with ▲ at the current hour, in the viewer's time
+  zone. Discord doesn't tell bots a user's time zone, so users set it once with `/timezone`. Until
+  they do, it's `STATS_TIMEZONE`, with a hint.
   A raw per-hour win rate is mostly noise: one game in a slot shows as 0% or 100%. So each hour pools
   its neighbours (± 1 h, wrapping around midnight) and is shrunk toward the player's overall win rate
   by 10 virtual games: `(wins + 10 × avg) / (games + 10)`. Hours with fewer than 5 pooled games show
@@ -80,7 +83,8 @@ DMs and the live feed, and saved in the database:
 | `/setup results #channel` | Finished matches with their results (cancelled ones aren't posted) |
 | `/setup roles #channel [streak_role] [tilt_role]` | A role picker with a button per alert role (🔥 **Win-streak alerts**, 😤 **Tilt-queue alerts**) |
 | `/setup streak #channel [min_streak]` | Pings the streak role when someone on a 5+ (or `min_streak`) win streak queues |
-| `/setup tilt #channel [min_losses] [window_minutes]` | Pings the tilt role when someone loses 2+ games back to back, requeuing within 10 min each time |
+| `/setup tilt #channel [min_losses] [window_minutes]` | Pings tilt roles when someone loses 2+ games back to back, requeuing within 10 min each time |
+| `/setup tilt-roles add @role [min_mmr] [max_mmr]` · `remove @role` | A tilt role for an MMR range (leave out either end for an open range: `min_mmr:1200` = 1200+) |
 | `/setup speed <eco\|normal\|fast>` | How often to poll (see below) |
 | `/setup disable <feature>` · `/setup show` | Turn a feature off · see what's set up |
 
@@ -96,6 +100,11 @@ DMs and the live feed, and saved in the database:
   games the bot saw, so a game it missed can't sneak in (a whole game doesn't fit in a quick gap). A
   requeue is often seen before the losing result is known, so the bot checks again when that result
   comes in. Each losing chain pings once.
+- **Tilt roles by MMR:** each tilt role can cover a range (inclusive, either end open). A tilt queue
+  sends **one** message to the tilt channel, mentioning every role whose range holds the player's
+  MMR, so overlapping ranges don't duplicate. If no range matches, nothing is posted. The role picker
+  gets a button per tilt role (*Tilt: 900–1100*, *Tilt: 1200+*, …). A tilt role set up before ranges
+  existed keeps working as the all-MMR one.
 - **The role** must be below the bot's own role, and **mentionable** (or give the bot **Mention
   Everyone**) for pings to notify people. `/setup` warns about both.
 - Like the feed, results and widgets cover the tracked players: the top `TOP_N` plus anyone followed.

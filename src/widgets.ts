@@ -60,7 +60,7 @@ export function queueWidget(
 
 export type RoleAlerts = {
   streak?: { channelId?: string; minStreak: number }
-  tilt?: { channelId?: string; minLosses: number }
+  tilt?: { channelId?: string; minLosses: number; ranged: boolean }
 }
 
 export function rolesWidget(alerts: RoleAlerts): WidgetContent {
@@ -73,7 +73,8 @@ export function rolesWidget(alerts: RoleAlerts): WidgetContent {
   }
   if (alerts.tilt) {
     lines.push(
-      `😤 **Tilt-queue alerts**: get pinged ${where(alerts.tilt.channelId)}when someone who lost ${alerts.tilt.minLosses}+ in a row queues right back up.`
+      `😤 **Tilt-queue alerts**: get pinged ${where(alerts.tilt.channelId)}when someone who lost ${alerts.tilt.minLosses}+ in a row queues right back up.` +
+        (alerts.tilt.ranged ? ' Pick the MMR range(s) you care about.' : '')
     )
   }
   return { title: '🔔 Notification roles', description: lines.join('\n'), footer: 'Click again to remove the role' }
@@ -84,9 +85,31 @@ export function streakAlert(label: string, streak: number, roleId: string): stri
   return `🔥 ${label} is on a **${streak}-win streak** and just queued! <@&${roleId}>`
 }
 
-/** Tilt-queue ping text. */
-export function tiltAlert(label: string, losses: number, roleId: string): string {
-  return `😤 ${label} lost **${losses} in a row** and is queuing right back up! <@&${roleId}>`
+/** Tilt-queue ping text: one message, mentioning every role it's for. */
+export function tiltAlert(label: string, losses: number, roleIds: string[]): string {
+  return `😤 ${label} lost **${losses} in a row** and is queuing right back up! ${roleIds.map((id) => `<@&${id}>`).join(' ')}`
+}
+
+/** A tilt alert role, optionally only for players within an MMR range (either end open). */
+export type TiltRole = { roleId: string; min?: number; max?: number }
+
+/** "900–1100", "1200+", "≤ 800", "all MMR". */
+export function rangeLabel(r: { min?: number; max?: number }): string {
+  if (r.min !== undefined && r.max !== undefined) return `${r.min}–${r.max}`
+  if (r.min !== undefined) return `${r.min}+`
+  if (r.max !== undefined) return `≤ ${r.max}`
+  return 'all MMR'
+}
+
+/** The roles to ping for a player: those whose range holds their MMR (unknown MMR: only open-for-all roles). */
+export function tiltRolesFor(roles: readonly TiltRole[], mmr: number | undefined): string[] {
+  return roles
+    .filter((r) => {
+      if (r.min === undefined && r.max === undefined) return true
+      if (mmr === undefined) return false
+      return (r.min === undefined || mmr >= r.min) && (r.max === undefined || mmr <= r.max)
+    })
+    .map((r) => r.roleId)
 }
 
 /** A game we saw finish: when the player queued for it, when it ended, and whether they won. */

@@ -24,6 +24,7 @@ import { Emojis } from './emoji.ts'
 import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
 import { SETUP_COMMAND, ServerFeatures } from './server.ts'
 import { type StatsService, statsText } from './stats.ts'
+import { isValidTimeZone, localTime, suggestTimeZones } from './timezones.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
@@ -74,6 +75,9 @@ const COMMANDS = [
   ),
   command('matchup', 'How long until you could queue into a player, and who they would likely get').addStringOption(
     playerOption('Player you want to play')
+  ),
+  command('timezone', 'Set your time zone (used for the time of day in /stats)').addStringOption((o) =>
+    o.setName('zone').setDescription('Your time zone: pick the one showing your current time').setAutocomplete(true)
   ),
   command('stats', "A player's ranked stats over all seasons")
     .addStringOption(playerOption('Player to look up'))
@@ -431,6 +435,7 @@ export class Bot {
   }
 
   async #autocomplete(i: AutocompleteInteraction) {
+    if (i.commandName === 'timezone') return i.respond(suggestTimeZones(i.options.getFocused(), i.locale))
     const q = i.options.getFocused().toLowerCase()
     let ids: string[]
     if (i.commandName === 'unsubscribe') {
@@ -577,6 +582,21 @@ export class Bot {
         })
       }
 
+      case 'timezone': {
+        const zone = i.options.getString('zone')?.trim()
+        const current = this.#store.getUserSetting(i.user.id, 'timezone')
+        if (!zone) {
+          return reply(
+            current
+              ? `Your time zone is **${current}** (now ${localTime(current)}).`
+              : `No time zone set, so /stats uses ${this.#cfg.statsTimeZone}. Pick yours with \`/timezone zone:\`.`
+          )
+        }
+        if (!isValidTimeZone(zone)) return reply('Unknown time zone. Pick one of the suggestions (they show their current time).')
+        this.#store.setUserSetting(i.user.id, 'timezone', zone)
+        return reply(`Time zone set to **${zone}** (now ${localTime(zone)}). /stats will show times of day in it.`)
+      }
+
       case 'stats': {
         const id = this.#resolvePlayer(i.options.getString('player', true))
         if (!id) return reply('Unknown player. Pick a suggestion or paste a user ID.')
@@ -609,12 +629,16 @@ export class Bot {
           note = "\n-# ⚠️ Couldn't reach the site's match history just now; these stats may be incomplete."
         }
         const viewerRanked = (await this.#predictor.mmrs([i.user.id])).get(i.user.id) != null
-        const s = this.#stats.stats(id, i.user.id, this.#cfg.statsTimeZone)
+        // Times in the viewer's own time zone if they set one (Discord doesn't tell bots).
+        const ownZone = this.#store.getUserSetting(i.user.id, 'timezone')
+        const s = this.#stats.stats(id, i.user.id, ownZone ?? this.#cfg.statsTimeZone)
         const text = statsText(s, {
           deckEmoji: (deck) => this.#emojis.get('deck', deck),
+          stakeEmoji: (stake) => this.#emojis.get('stake', stake),
           viewerRanked,
           isSelf: id === i.user.id,
         })
+        if (!ownZone) note += `\n-# Times are in ${this.#cfg.statsTimeZone}. Use /timezone to see them in yours.`
         const embed = new EmbedBuilder()
           .setTitle(`📊 ${this.#name(id)} · ranked stats`)
           .setURL(`${this.#cfg.siteUrl}/players/${id}`)

@@ -29,9 +29,12 @@ import {
   queueWidget,
   type RoleAlerts,
   rolesWidget,
+  rangeLabel,
   streakAlert,
+  type TiltRole,
   tiltAlert,
   tiltChain,
+  tiltRolesFor,
   type WidgetContent,
 } from './widgets.ts'
 
@@ -46,18 +49,21 @@ const S = {
   streakRole: 'streak_role',
   streakChannel: 'streak_channel',
   streakMin: 'streak_min',
+  /** Before MMR ranges: a single tilt role (migrated into tiltRoles on first use). */
   tiltRole: 'tilt_role',
+  /** JSON TiltRole[]: tilt alert roles, each with an optional MMR range. */
+  tiltRoles: 'tilt_roles',
   tiltChannel: 'tilt_channel',
   tiltMin: 'tilt_min',
   tiltWindow: 'tilt_window_minutes',
   pollSpeed: 'poll_speed',
 } as const
 
-/** Role picker buttons → the setting holding their role. */
-const ROLE_BUTTONS: Record<string, string> = {
-  'tracklatro:role:streak': S.streakRole,
-  'tracklatro:role:tilt': S.tiltRole,
-}
+/** Role picker buttons: the streak role, and one per tilt role (`…:tilt:<role id>`). */
+const STREAK_BUTTON = 'tracklatro:role:streak'
+const TILT_BUTTON = 'tracklatro:role:tilt'
+/** Discord allows 5 rows of 5 buttons per message. */
+const MAX_TILT_ROLES = 24
 const DEFAULT_STREAK_MIN = 5
 const DEFAULT_TILT_MIN = 2
 const DEFAULT_TILT_WINDOW_MINUTES = 10
@@ -171,6 +177,25 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
             { name: 'normal: every 10s / 30s idle (.env defaults)', value: 'normal' },
             { name: 'fast: every 5s / 10s idle (quickest notifications)', value: 'fast' }
           )
+      )
+  )
+  .addSubcommandGroup((g) =>
+    g
+      .setName('tilt-roles')
+      .setDescription('Tilt alert roles, each optionally for an MMR range')
+      .addSubcommand((s) =>
+        s
+          .setName('add')
+          .setDescription('Add (or change) a tilt alert role; leave out min/max for an open-ended range')
+          .addRoleOption((o) => o.setName('role').setDescription('Role to ping').setRequired(true))
+          .addIntegerOption((o) => o.setName('min_mmr').setDescription('Only players at or above this MMR').setMinValue(0))
+          .addIntegerOption((o) => o.setName('max_mmr').setDescription('Only players at or below this MMR').setMinValue(0))
+      )
+      .addSubcommand((s) =>
+        s
+          .setName('remove')
+          .setDescription('Remove a tilt alert role')
+          .addRoleOption((o) => o.setName('role').setDescription('Role to remove').setRequired(true))
       )
   )
   .addSubcommand((s) => s.setName('show').setDescription('Show the current setup'))
@@ -348,17 +373,49 @@ export class ServerFeatures {
     if (losses >= this.#tiltMin()) await this.#ping('tilt', playerId, games.at(-1)!.endedAt, losses)
   }
 
-  /** Pings an alert role about a player, once per `dedupe` value (a streak, a loss). */
+  /**
+   * Pings about a player, once per `dedupe` value (a streak, a loss). Tilt
+   * alerts go out as one message mentioning every tilt role whose MMR range
+   * holds the player (none: no message).
+   */
   async #ping(kind: 'streak' | 'tilt', playerId: string, dedupe: number, count: number) {
-    const roleId = this.#store.getSetting(kind === 'streak' ? S.streakRole : S.tiltRole)
     const channel = await this.#channel(this.#store.getSetting(kind === 'streak' ? S.streakChannel : S.tiltChannel))
     const key = `${kind}:${playerId}`
-    if (!roleId || !channel || this.#pinged.get(key) === dedupe) return
+    if (!channel || this.#pinged.get(key) === dedupe) return
+    const streakRole = this.#store.getSetting(S.streakRole)
+    const roleIds =
+      kind === 'streak'
+        ? streakRole
+          ? [streakRole]
+          : []
+        : tiltRolesFor(this.#tiltRoles(), this.#tracker.players.get(playerId)?.mmr)
+    if (!roleIds.length) return
     this.#pinged.set(key, dedupe)
     await this.#named([playerId])
     const label = this.#label(playerId)
-    const content = kind === 'streak' ? streakAlert(label, count, roleId) : tiltAlert(label, count, roleId)
-    await channel.send({ content, allowedMentions: { roles: [roleId] } }).catch((err) => warn(`${kind} ping`, err))
+    const content = kind === 'streak' ? streakAlert(label, count, roleIds[0]!) : tiltAlert(label, count, roleIds)
+    await channel.send({ content, allowedMentions: { roles: roleIds } }).catch((err) => warn(`${kind} ping`, err))
+  }
+
+  /** Tilt alert roles; a role set up before ranges existed becomes an all-MMR one. */
+  #tiltRoles(): TiltRole[] {
+    let roles: TiltRole[] = []
+    try {
+      roles = JSON.parse(this.#store.getSetting(S.tiltRoles) ?? '[]') as TiltRole[]
+    } catch {
+      warn('tilt roles', 'unreadable setting, starting empty')
+    }
+    const legacy = this.#store.getSetting(S.tiltRole)
+    if (legacy) {
+      if (!roles.some((r) => r.roleId === legacy)) roles.unshift({ roleId: legacy })
+      this.#saveTiltRoles(roles)
+      this.#store.deleteSetting(S.tiltRole)
+    }
+    return roles
+  }
+
+  #saveTiltRoles(roles: TiltRole[]) {
+    this.#store.setSetting(S.tiltRoles, JSON.stringify(roles))
   }
 
   #streakMin(): number {
@@ -380,11 +437,15 @@ export class ServerFeatures {
     const buttons: ButtonBuilder[] = []
     if (this.#store.getSetting(S.streakRole)) {
       alerts.streak = { channelId: this.#store.getSetting(S.streakChannel), minStreak: this.#streakMin() }
-      buttons.push(roleButton('tracklatro:role:streak', 'Win-streak alerts', '🔥'))
+      buttons.push(roleButton(STREAK_BUTTON, 'Win-streak alerts', '🔥'))
     }
-    if (this.#store.getSetting(S.tiltRole)) {
-      alerts.tilt = { channelId: this.#store.getSetting(S.tiltChannel), minLosses: this.#tiltMin() }
-      buttons.push(roleButton('tracklatro:role:tilt', 'Tilt-queue alerts', '😤'))
+    const tiltRoles = this.#tiltRoles()
+    if (tiltRoles.length) {
+      const ranged = tiltRoles.some((r) => r.min !== undefined || r.max !== undefined)
+      alerts.tilt = { channelId: this.#store.getSetting(S.tiltChannel), minLosses: this.#tiltMin(), ranged }
+      for (const r of tiltRoles) {
+        buttons.push(roleButton(`${TILT_BUTTON}:${r.roleId}`, ranged ? `Tilt: ${rangeLabel(r)}` : 'Tilt-queue alerts', '😤'))
+      }
     }
     const content = rolesWidget(alerts)
     const embed = new EmbedBuilder()
@@ -392,15 +453,26 @@ export class ServerFeatures {
       .setDescription(content.description)
       .setFooter({ text: content.footer })
       .setColor(0xe67e22)
-    const components = buttons.length ? [new ActionRowBuilder<ButtonBuilder>().addComponents(buttons)] : []
+    const components: ActionRowBuilder<ButtonBuilder>[] = []
+    for (let i = 0; i < buttons.length; i += 5) {
+      components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons.slice(i, i + 5)))
+    }
     await this.#upsert(S.rolesChannel, S.rolesMessage, { embeds: [embed], components })
   }
 
   /** Returns true if this was one of our buttons. */
   async handleButton(i: ButtonInteraction): Promise<boolean> {
-    const setting = ROLE_BUTTONS[i.customId]
-    if (!setting) return false
-    const roleId = this.#store.getSetting(setting)
+    let roleId: string | undefined
+    if (i.customId === STREAK_BUTTON) {
+      roleId = this.#store.getSetting(S.streakRole)
+    } else if (i.customId.startsWith(TILT_BUTTON)) {
+      // `…:tilt:<role id>`; a bare `…:tilt` is a button from before ranges (the all-MMR role).
+      const id = i.customId.slice(TILT_BUTTON.length + 1)
+      const roles = this.#tiltRoles()
+      roleId = id ? roles.find((r) => r.roleId === id)?.roleId : roles.find((r) => r.min === undefined && r.max === undefined)?.roleId
+    } else {
+      return false
+    }
     if (!i.inCachedGuild() || !roleId) {
       await i.reply({ content: 'This role picker is no longer set up.', flags: MessageFlags.Ephemeral })
       return true
@@ -431,6 +503,32 @@ export class ServerFeatures {
     const reply = (content: string) => i.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } })
     const sub = i.options.getSubcommand()
 
+    if (i.options.getSubcommandGroup(false) === 'tilt-roles') {
+      const role = i.options.getRole('role', true)
+      const roles = this.#tiltRoles().filter((r) => r.roleId !== role.id)
+      if (sub === 'remove') {
+        this.#saveTiltRoles(roles)
+        await this.#refreshRolesWidget()
+        return reply(`${role} no longer gets tilt alerts.`)
+      }
+      const min = i.options.getInteger('min_mmr') ?? undefined
+      const max = i.options.getInteger('max_mmr') ?? undefined
+      if (min !== undefined && max !== undefined && min > max) return reply('`min_mmr` must be at most `max_mmr`.')
+      if (roles.length >= MAX_TILT_ROLES) return reply(`That's the maximum of ${MAX_TILT_ROLES} tilt roles (one button each).`)
+      const problem = roleProblem(role, i.guild.members.me!)
+      if (problem) return reply(problem)
+      roles.push({ roleId: role.id, min, max })
+      roles.sort((a, b) => (a.min ?? -1) - (b.min ?? -1) || (a.max ?? Infinity) - (b.max ?? Infinity))
+      this.#saveTiltRoles(roles)
+      await this.#refreshRolesWidget()
+      return reply(
+        `${role} gets tilt alerts for **${rangeLabel({ min, max })}**.` +
+          (this.#store.getSetting(S.tiltChannel) ? '' : '\nSet the channel with `/setup tilt`.') +
+          (this.#store.getSetting(S.rolesChannel) ? '' : '\nPost a role picker with `/setup roles` so people can pick it.') +
+          (role.mentionable ? '' : "\n⚠️ That role isn't mentionable: turn on **Allow anyone to @mention this role**, or the pings won't notify anyone.")
+      )
+    }
+
     if (sub === 'speed') {
       const speed = i.options.getString('speed', true)
       if (!isSpeed(speed)) return reply('Unknown speed.')
@@ -442,6 +540,7 @@ export class ServerFeatures {
     if (sub === 'show') {
       const ch = (key: string) => (this.#store.getSetting(key) ? `<#${this.#store.getSetting(key)}>` : '—')
       const role = (key: string) => (this.#store.getSetting(key) ? `<@&${this.#store.getSetting(key)}>` : '—')
+      const tiltRoles = this.#tiltRoles().map((r) => `  · <@&${r.roleId}>: ${rangeLabel(r)}`)
       return reply(
         [
           `**Ongoing matches widget:** ${ch(S.matchesChannel)}`,
@@ -449,7 +548,8 @@ export class ServerFeatures {
           `**Results:** ${ch(S.resultsChannel)}`,
           `**Role picker:** ${ch(S.rolesChannel)}`,
           `**Win-streak pings:** ${ch(S.streakChannel)} · ${role(S.streakRole)} · ${this.#streakMin()}+ wins`,
-          `**Tilt-queue pings:** ${ch(S.tiltChannel)} · ${role(S.tiltRole)} · ${this.#tiltMin()}+ losses, requeued within ${this.#tiltWindowMs() / 60_000} min`,
+          `**Tilt-queue pings:** ${ch(S.tiltChannel)} · ${this.#tiltMin()}+ losses, requeued within ${this.#tiltWindowMs() / 60_000} min`,
+          ...(tiltRoles.length ? tiltRoles : ['  · no tilt roles (`/setup tilt-roles add`)']),
           `**Polling speed:** ${describeSpeed(this.#config, this.#config.speed)}`,
         ].join('\n')
       )
@@ -496,8 +596,8 @@ export class ServerFeatures {
       // Roles not given keep their current setting, so either can be added later.
       const streakRole = i.options.getRole('streak_role')
       const tiltRole = i.options.getRole('tilt_role')
-      if (!streakRole && !tiltRole && !this.#store.getSetting(S.streakRole) && !this.#store.getSetting(S.tiltRole)) {
-        return reply('Give at least one role: `streak_role` and/or `tilt_role`.')
+      if (!streakRole && !tiltRole && !this.#store.getSetting(S.streakRole) && !this.#tiltRoles().length) {
+        return reply('Give at least one role: `streak_role` and/or `tilt_role` (or add ranged ones with `/setup tilt-roles add`).')
       }
       for (const role of [streakRole, tiltRole]) {
         const problem = role && roleProblem(role, i.guild.members.me!)
@@ -506,14 +606,20 @@ export class ServerFeatures {
       await this.#deleteMessage(S.rolesChannel, S.rolesMessage)
       this.#store.setSetting(S.rolesChannel, channel.id)
       if (streakRole) this.#store.setSetting(S.streakRole, streakRole.id)
-      if (tiltRole) this.#store.setSetting(S.tiltRole, tiltRole.id)
+      // A tilt role given here is for all MMR; keep its range if it already has one.
+      const tiltRoles = this.#tiltRoles()
+      if (tiltRole && !tiltRoles.some((r) => r.roleId === tiltRole.id)) {
+        this.#saveTiltRoles([{ roleId: tiltRole.id }, ...tiltRoles].slice(0, MAX_TILT_ROLES))
+      }
       await this.#postRolesWidget()
       return reply(`Role picker posted in ${channel}.`)
     }
 
     if (sub === 'streak' || sub === 'tilt') {
-      const role = this.#store.getSetting(sub === 'streak' ? S.streakRole : S.tiltRole)
-      if (!role) return reply(`Set up the role first: \`/setup roles ${sub}_role:…\`.`)
+      const roles = sub === 'streak' ? [this.#store.getSetting(S.streakRole)].filter((r) => r !== undefined) : this.#tiltRoles().map((r) => r.roleId)
+      if (!roles.length) {
+        return reply(sub === 'streak' ? 'Set up the role first: `/setup roles streak_role:…`.' : 'Add a tilt role first: `/setup tilt-roles add`.')
+      }
       let what: string
       if (sub === 'streak') {
         this.#store.setSetting(S.streakChannel, channel.id)
@@ -526,12 +632,13 @@ export class ServerFeatures {
         what = `someone loses ${this.#tiltMin()}+ games back to back and keeps requeuing (each time within ${this.#tiltWindowMs() / 60_000} min)`
       }
       await this.#refreshRolesWidget()
-      const mentionable = i.guild.roles.cache.get(role)?.mentionable
+      const notMentionable = roles.filter((r) => !i.guild.roles.cache.get(r)?.mentionable)
       return reply(
-        `<@&${role}> will be pinged in ${channel} when ${what}.` +
-          (mentionable
-            ? ''
-            : "\n⚠️ That role isn't mentionable: turn on **Allow anyone to @mention this role** (or give me **Mention Everyone**), or the pings won't notify anyone.")
+        `${roles.map((r) => `<@&${r}>`).join(' ')} will be pinged in ${channel} when ${what}` +
+          (sub === 'tilt' ? ' (each role only for its MMR range, in one message).' : '.') +
+          (notMentionable.length
+            ? `\n⚠️ Not mentionable: ${notMentionable.map((r) => `<@&${r}>`).join(' ')}. Turn on **Allow anyone to @mention this role** (or give me **Mention Everyone**), or the pings won't notify anyone.`
+            : '')
       )
     }
   }

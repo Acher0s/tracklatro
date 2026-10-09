@@ -50,7 +50,7 @@ test('computeStats: record, decks best → worst without Cocktail, head-to-head'
   const s = computeStats(games, [20 * MIN, 30 * MIN], 'me')
   assert.deepEqual([s.games, s.wins, s.losses], [8, 5, 3]) // the tie doesn't count
   assert.deepEqual(
-    s.decks.map((d) => `${d.deck} ${d.wins}/${d.games}`),
+    s.decks.map((d) => `${d.name} ${d.wins}/${d.games}`),
     ['Red Deck 3/4', 'Blue Deck 1/2', 'Plasma Deck 0/1']
   )
   assert.equal(s.avgDurationMs, 25 * MIN)
@@ -63,10 +63,27 @@ test('a deck won once does not outrank a deck that wins a lot over many games', 
   for (let i = 0; i < 40; i++) games.push(row(200 + i, i % 2 ? 'win' : 'loss', 'Meh Deck')) // 50%
   const s = computeStats(games, [])
   assert.deepEqual(
-    s.decks.map((d) => d.deck),
+    s.decks.map((d) => d.name),
     ['Solid Deck', 'Lucky Deck', 'Meh Deck']
   )
   assert.equal(s.decks[1]?.winrate, 1) // the real rate is still what's shown
+})
+
+test('stakes are ranked and shown alongside decks', () => {
+  const games: GameRow[] = []
+  for (let i = 0; i < 30; i++) games.push({ ...row(i, i % 3 ? 'win' : 'loss', 'Red Deck'), stake: 'White Stake' }) // 67%
+  for (let i = 0; i < 30; i++) games.push({ ...row(100 + i, i % 3 ? 'loss' : 'win', 'Red Deck'), stake: 'Gold Stake' }) // 33%
+  const s = computeStats(games, [])
+  assert.deepEqual(
+    s.stakes.map((g) => `${g.name} ${g.wins}/${g.games}`),
+    ['White Stake 20/30', 'Gold Stake 10/30']
+  )
+  const text = statsText(s, { deckEmoji: () => '🃏', stakeEmoji: (n) => `<${n}>`, viewerRanked: false, isSelf: true }).description
+  assert.ok(
+    text.includes('**Stakes** (best → worst; few games count for less)\n<White Stake> `▰▰▰▰▰▰▰▱▱▱` **66.7%** White · 30 games'),
+    text
+  )
+  assert.ok(text.indexOf('**Decks**') < text.indexOf('**Stakes**'))
 })
 
 test('only standard ranked counts (any capitalisation)', () => {
@@ -78,15 +95,15 @@ test('only standard ranked counts (any capitalisation)', () => {
 
 test('statsText: no subtext markers mid-line, head-to-head only when it makes sense', () => {
   const s = computeStats([row(1, 'win', 'Red Deck'), row(2, 'loss', 'Red Deck', 'me')], [], 'me')
-  const t = statsText(s, { deckEmoji: () => '🃏', viewerRanked: true, isSelf: false })
+  const t = statsText(s, { deckEmoji: () => '🃏', stakeEmoji: () => '🎲', viewerRanked: true, isSelf: false })
   assert.match(t.description, /\*\*Record:\*\* 1W – 1L · \*\*50\.0%\*\* winrate/)
   assert.match(t.description, /\*\*You vs them:\*\* 1W – 0L/)
   assert.match(t.description, /🃏 `▰▰▰▰▰▱▱▱▱▱` \*\*50\.0%\*\* Red · 2 games/)
   assert.ok(t.description.split('\n').every((l) => !l.includes('-#') || l.startsWith('-#')))
-  assert.doesNotMatch(statsText(s, { deckEmoji: () => '', viewerRanked: true, isSelf: true }).description, /You vs them/)
+  assert.doesNotMatch(statsText(s, { deckEmoji: () => '', stakeEmoji: () => '', viewerRanked: true, isSelf: true }).description, /You vs them/)
   const none = computeStats([row(1, 'win', 'Red Deck')], [], 'me')
-  assert.match(statsText(none, { deckEmoji: () => '', viewerRanked: true, isSelf: false }).description, /no ranked games against each other/)
-  assert.doesNotMatch(statsText(none, { deckEmoji: () => '', viewerRanked: false, isSelf: false }).description, /You vs them/)
+  assert.match(statsText(none, { deckEmoji: () => '', stakeEmoji: () => '', viewerRanked: true, isSelf: false }).description, /no ranked games against each other/)
+  assert.doesNotMatch(statsText(none, { deckEmoji: () => '', stakeEmoji: () => '', viewerRanked: false, isSelf: false }).description, /You vs them/)
   assert.equal(bar(0.71), '▰▰▰▰▰▰▰▱▱▱')
 })
 

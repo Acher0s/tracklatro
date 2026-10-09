@@ -100,6 +100,12 @@ export class Store {
         synced_at INTEGER NOT NULL,
         PRIMARY KEY (player_id, season)
       );
+      CREATE TABLE IF NOT EXISTS user_settings (
+        user_id TEXT NOT NULL,
+        key     TEXT NOT NULL,
+        value   TEXT NOT NULL,
+        PRIMARY KEY (user_id, key)
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -306,6 +312,25 @@ export class Store {
          ON CONFLICT (player_id, season) DO UPDATE SET complete = 1, synced_at = excluded.synced_at`
       )
       .run(playerId, season, syncedAt)
+  }
+
+  // ------------------------------------------------------------ user settings
+
+  getUserSetting(userId: string, key: string): string | undefined {
+    return (
+      this.#db.prepare('SELECT value FROM user_settings WHERE user_id = ? AND key = ?').get(userId, key) as
+        | { value: string }
+        | undefined
+    )?.value
+  }
+
+  setUserSetting(userId: string, key: string, value: string) {
+    this.#db
+      .prepare(
+        `INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?)
+         ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value`
+      )
+      .run(userId, key, value)
   }
 
   // ----------------------------------------------------------------- settings

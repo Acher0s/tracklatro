@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { fitLines, matchesWidget, queueWidget, rolesWidget, streakAlert, tiltAlert, tiltChain } from './widgets.ts'
+import {
+  fitLines,
+  matchesWidget,
+  queueWidget,
+  rangeLabel,
+  rolesWidget,
+  streakAlert,
+  tiltAlert,
+  tiltChain,
+  tiltRolesFor,
+} from './widgets.ts'
 
 const label = (id: string) => `**${id}**`
 
@@ -43,15 +53,39 @@ test('queue widget: longest waiting first', () => {
 })
 
 test('roles widget lists only the configured alerts', () => {
-  const both = rolesWidget({ streak: { channelId: '123', minStreak: 5 }, tilt: { minLosses: 2 } }).description
+  const both = rolesWidget({ streak: { channelId: '123', minStreak: 5 }, tilt: { minLosses: 2, ranged: false } }).description
   assert.match(both, /pinged in <#123> when someone on a 5\+ win streak queues/)
-  assert.match(both, /Tilt-queue alerts\*\*: get pinged when someone who lost 2\+ in a row queues right back up/)
-  assert.doesNotMatch(rolesWidget({ tilt: { minLosses: 3 } }).description, /Win-streak/)
+  assert.match(both, /Tilt-queue alerts\*\*: get pinged when someone who lost 2\+ in a row queues right back up\.$/m)
+  assert.doesNotMatch(rolesWidget({ tilt: { minLosses: 3, ranged: false } }).description, /Win-streak/)
+  assert.match(rolesWidget({ tilt: { minLosses: 2, ranged: true } }).description, /Pick the MMR range\(s\) you care about/)
 })
 
-test('alert texts', () => {
+test('alert texts: one tilt message mentions every matching role', () => {
   assert.equal(streakAlert('**bacon**', 8, '999'), '🔥 **bacon** is on a **8-win streak** and just queued! <@&999>')
-  assert.equal(tiltAlert('**yenn**', 3, '42'), '😤 **yenn** lost **3 in a row** and is queuing right back up! <@&42>')
+  assert.equal(tiltAlert('**yenn**', 3, ['42']), '😤 **yenn** lost **3 in a row** and is queuing right back up! <@&42>')
+  assert.equal(tiltAlert('**yenn**', 2, ['1', '2']), '😤 **yenn** lost **2 in a row** and is queuing right back up! <@&1> <@&2>')
+})
+
+test('tilt roles: MMR ranges, open ends, inclusive bounds', () => {
+  const roles = [
+    { roleId: 'all' },
+    { roleId: 'low', max: 800 },
+    { roleId: 'mid', min: 900, max: 1100 },
+    { roleId: 'high', min: 1200 },
+  ]
+  assert.deepEqual(tiltRolesFor(roles, 750), ['all', 'low'])
+  assert.deepEqual(tiltRolesFor(roles, 800), ['all', 'low'])
+  assert.deepEqual(tiltRolesFor(roles, 850), ['all']) // between ranges: only the all-MMR role
+  assert.deepEqual(tiltRolesFor(roles, 1100), ['all', 'mid'])
+  assert.deepEqual(tiltRolesFor(roles, 1500), ['all', 'high'])
+  assert.deepEqual(tiltRolesFor(roles, undefined), ['all']) // MMR unknown
+  assert.deepEqual(tiltRolesFor([{ roleId: 'mid', min: 900, max: 1100 }], 1300), []) // no message at all
+  // Overlapping ranges: both roles, still one message.
+  assert.deepEqual(tiltRolesFor([{ roleId: 'a', min: 900 }, { roleId: 'b', max: 1000 }], 950), ['a', 'b'])
+  assert.deepEqual(
+    [{ min: 900, max: 1100 }, { min: 1200 }, { max: 800 }, {}].map(rangeLabel),
+    ['900–1100', '1200+', '≤ 800', 'all MMR']
+  )
 })
 
 test('tiltChain: losses back to back, each followed by a quick requeue', () => {
