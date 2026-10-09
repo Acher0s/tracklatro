@@ -32,6 +32,15 @@ function bands(raw: string): Array<[number, number]> {
   })
 }
 
+function timeZone(name: string): string {
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: name })
+    return name
+  } catch {
+    throw new Error(`STATS_TIMEZONE: unknown time zone "${name}" (use an IANA name like Europe/Brussels)`)
+  }
+}
+
 export function loadConfig() {
   const hotIntervalMs = num('HOT_POLL_SECONDS', 10, 5) * 1000
   const warmIntervalMs = num('WARM_POLL_SECONDS', 30, 10) * 1000
@@ -62,11 +71,16 @@ export function loadConfig() {
     staleQueueMs: num('STALE_QUEUE_HOURS', 2, 0.5) * 3_600_000,
 
     matchmaking: {
-      searchStart: num('MM_SEARCH_START', 0),
+      // Live ranked values per the BMP Discord (Oct 2026): search starts at 200,
+      // instaqueue at 895+ (≈ top 125, adjusted by staff) and at 400 and below.
+      searchStart: num('MM_SEARCH_START', 200),
       /** undefined = calibrate from observed matches, falling back to Botlatro's default of 1. */
       searchIncrement: optional('MM_SEARCH_INCREMENT') === undefined ? undefined : num('MM_SEARCH_INCREMENT', 1),
-      instaqueue: bands(process.env.MM_INSTAQUEUE ?? '650-2000,0-450'),
+      instaqueue: bands(process.env.MM_INSTAQUEUE ?? '895-99999,0-400'),
     },
+
+    /** Time zone for the time-of-day stats (IANA name, e.g. Europe/Brussels). */
+    statsTimeZone: timeZone(process.env.STATS_TIMEZONE?.trim() || 'UTC'),
 
     dbPath: str('DB_PATH', './data/tracklatro.db'),
     maxSubscriptionsPerUser: num('MAX_SUBSCRIPTIONS_PER_USER', 25, 1),

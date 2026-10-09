@@ -14,6 +14,8 @@ const game = (gameId: number, gameTime: string, opponentId: string, result: 'win
   result,
   deck: 'Yellow Deck',
   stake: 'Spectral+ Stake',
+  gameType: 'ranked',
+  season: 'season7',
 })
 
 const match: TrackedMatch = {
@@ -51,13 +53,20 @@ test('ResultSource asks the site for the active season, once', async () => {
         { id: 7, name: 'Season 7', startDate: '2026-07-01T17:00:00Z', endDate: null, isActive: true },
       ]
     },
-    fetchMatchHistory: async (userId: string, season: string, pageSize: number) => {
-      calls.push(`history ${userId} ${season} ${pageSize}`)
-      return [game(4, '2026-10-08T10:00:01Z', 'b')]
+    fetchMatchHistory: async (userId: string, season: string, opts: { pageSize: number }) => {
+      calls.push(`history ${userId} ${season} ${opts.pageSize}`)
+      return { data: [game(4, '2026-10-08T10:00:01Z', 'b')], totalPages: 1 }
     },
   } as unknown as Api
   const source = new ResultSource(api)
   assert.equal((await source.history('a'))[0]?.matchId, 4)
   await source.history('a')
   assert.deepEqual(calls, ['seasons', 'history a season7 3', 'history a season7 3'])
+  assert.deepEqual(await source.seasons(), {
+    all: [
+      { key: 'season6', endsAt: Date.parse('2026-07-01T17:00:00Z') },
+      { key: 'season7', endsAt: null },
+    ],
+    active: 'season7',
+  })
 })

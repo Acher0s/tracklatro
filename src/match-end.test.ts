@@ -30,6 +30,8 @@ const record = (opponentId: string): MatchRecord => ({
   mmrChange: 12,
   deck: 'Red Deck',
   stake: 'White Stake',
+  gameType: 'ranked',
+  season: 'season7',
 })
 
 /** Tracker with a scripted match history; lets tests run the result-lookup timers. */

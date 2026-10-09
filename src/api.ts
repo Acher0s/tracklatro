@@ -44,6 +44,10 @@ export type SiteGame = {
   result: 'win' | 'loss' | 'tie'
   deck: string | null
   stake: string | null
+  /** 'ranked', 'casual', … */
+  gameType: string
+  /** 'season7', … */
+  season: string | null
 }
 
 export type QueueCounts = { queued: number; running: number }
@@ -224,15 +228,29 @@ export class Api {
   }
 
   /** A player's newest games in a season (`season7`, …), newest first. */
-  async fetchMatchHistory(userId: string, season: string, pageSize: number): Promise<SiteGame[]> {
-    const result = await this.#trpcOne<object, { data: SiteGame[] }>('history.user_games_page', {
+  /**
+   * A player's entire history, every season and mode, in one request
+   * (`history.user_games`: old seasons from the site's database, the rest
+   * from the queue bot). The paged procedure below only looks at the newest
+   * ~500 matches per page, so it can't reach older seasons.
+   */
+  async fetchFullHistory(userId: string): Promise<SiteGame[]> {
+    return this.#trpcOne<object, SiteGame[]>('history.user_games', { user_id: userId })
+  }
+
+  async fetchMatchHistory(
+    userId: string,
+    season: string,
+    opts: { pageSize: number; page?: number; gameType?: 'ranked' }
+  ): Promise<{ data: SiteGame[]; totalPages: number }> {
+    return this.#trpcOne<object, { data: SiteGame[]; totalPages: number }>('history.user_games_page', {
       user_id: userId,
       season,
-      page: 1,
-      pageSize,
+      gameType: opts.gameType,
+      page: opts.page ?? 1,
+      pageSize: opts.pageSize, // server max 100
       sortBy: 'gameTime',
       sortOrder: 'desc',
     })
-    return result.data
   }
 }

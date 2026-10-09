@@ -38,11 +38,35 @@ the top players.
 | `/live` | Everyone queuing or in a game right now |
 | `/matchup player` | How long until you could queue into them, and who they'd likely get instead |
 | `/recent [player]` | Recently tracked matches with results |
+| `/stats player [public]` | Ranked stats over all seasons (see below) |
 | `/about` | What's tracked and how many requests the bot has made |
 | `/setup …` | Server channels: widgets, results, role picker, win-streak pings (see below) |
 
 If someone queues and gets matched between two polls, people subscribed only to **queue** still get
 the "match found" message, because from their point of view that player did queue.
+
+## Stats (`/stats`)
+
+`/stats player` shows a player's **standard ranked** games over **all seasons**. Other modes
+(legacy, smallworld, casual, …) aren't counted.
+
+- **Record and win rate.**
+- **Average game length.** The site's history has no game length, so this only covers ranked games
+  the bot watched from start to end, and says how many.
+- **Win rate by time of day,** as a 24-hour chart with ▲ at the current hour, in `STATS_TIMEZONE`.
+  A raw per-hour win rate is mostly noise: one game in a slot shows as 0% or 100%. So each hour pools
+  its neighbours (± 1 h, wrapping around midnight) and is shrunk toward the player's overall win rate
+  by 10 virtual games: `(wins + 10 × avg) / (games + 10)`. Hours with fewer than 5 pooled games show
+  `·`. The summary line gives the best and worst hour and the current one, relative to their average.
+- **Decks, best to worst,** without Cocktail Deck, with win rate and game count. They're ranked by the
+  same shrunk win rate, so a deck won once doesn't outrank one at 75% over a hundred games.
+- **You vs them:** your record against that player, if you play ranked.
+
+**Data.** Ranked results the bot sees are stored as they happen, with game length. The first `/stats`
+for a player fetches their complete history in one request (`history.user_games`), which takes a
+moment and says so. Later calls top up the current season's newest games since the last sync, so
+downtime gets filled in. A season that ended while the bot was down is caught up once, and after
+more than 14 days without a sync the full history is fetched again.
 
 ## Server channels (`/setup`)
 
@@ -137,12 +161,18 @@ tracked set are invisible. Forecasts only run when a followed player queues, so 
 extra site requests per event.
 
 **Queue settings.** Botlatro only exposes its real queue settings through its authenticated API. The
-model uses Botlatro's built-in defaults (`MM_SEARCH_START=0`, instaqueue bands `650-2000,0-450`) unless
-you set them. If `MM_SEARCH_INCREMENT` isn't set, the bot **calibrates** it from matches it watches
-happen. Each pairing where both queue joins were seen gives a lower bound
-(`increment > gap / ticks waited`), and the bot uses the 75th percentile once it has 15 samples
-(`/about` shows the current model). The best fix is to ask the maintainers for the real
-"Standard Ranked" values and set them in `.env`.
+defaults are the live "Standard Ranked" values shared in the BMP Discord (Oct 2026):
+
+- **Instaqueue** at **895+** and at **400 and below** (`MM_INSTAQUEUE=895-99999,0-400`). Two players in
+  the same band match instantly. Staff move the high band to roughly the **top 125** of the
+  leaderboard, so update it in `.env` if it changes.
+- Otherwise players match within **200 MMR** (`MM_SEARCH_START=200`), plus a range that grows the
+  longer they wait.
+
+How fast that range grows isn't public. If `MM_SEARCH_INCREMENT` isn't set, the bot **calibrates** it
+from matches it watches happen. Each pairing where both queue joins were seen gives a lower bound
+(`increment > (gap − 200) / ticks waited`), and the bot uses the 75th percentile once it has 15 samples.
+`/about` shows the current model.
 
 ## How it works
 
@@ -234,5 +264,6 @@ npm run dev       # restart on file changes
 | `src/db.ts` | SQLite: subscriptions + match log |
 | `src/bot.ts` | Discord commands, DMs, feed |
 | `src/server.ts` | `/setup`: widgets, results channel, role picker, win-streak pings |
+| `src/stats.ts` | `/stats`: stored ranked games, history sync, stats and time-of-day chart |
 | `src/widgets.ts` | Widget and alert content (pure, tested) |
 | `src/queue-posts.ts` | 🟢/🟡/⚪ coloring of "queued" posts |

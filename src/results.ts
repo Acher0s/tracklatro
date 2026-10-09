@@ -12,6 +12,10 @@ export type MatchRecord = {
   mmrChange: number
   deck: string | null
   stake: string | null
+  /** 'ranked', 'casual', … */
+  gameType: string
+  /** 'season7', … */
+  season: string | null
 }
 
 export function fromSite(g: SiteGame): MatchRecord {
@@ -24,6 +28,8 @@ export function fromSite(g: SiteGame): MatchRecord {
     mmrChange: g.mmrChange,
     deck: g.deck,
     stake: g.stake,
+    gameType: g.gameType,
+    season: g.season,
   }
 }
 
@@ -60,25 +66,31 @@ const PAGE_SIZE = 3
  */
 export class ResultSource {
   readonly #api: Api
-  #season: { key: string; at: number } | undefined
+  #seasons: { list: Seasons; at: number } | undefined
 
   constructor(api: Api) {
     this.#api = api
   }
 
   async history(userId: string): Promise<MatchRecord[]> {
-    const games = await this.#api.fetchMatchHistory(userId, await this.#seasonKey(), PAGE_SIZE)
-    return games.map(fromSite)
+    const { active } = await this.seasons()
+    const { data } = await this.#api.fetchMatchHistory(userId, active, { pageSize: PAGE_SIZE })
+    return data.map(fromSite)
   }
 
-  async #seasonKey(): Promise<string> {
-    if (this.#season && Date.now() - this.#season.at < SEASON_TTL_MS) return this.#season.key
-    const seasons = await this.#api.fetchSeasons()
-    const active =
-      seasons.find((s) => s.isActive) ??
-      [...seasons].sort((a, b) => Date.parse(b.startDate) - Date.parse(a.startDate))[0]
+  /** All seasons (oldest first) and the active one's key; cached. */
+  async seasons(): Promise<Seasons> {
+    if (this.#seasons && Date.now() - this.#seasons.at < SEASON_TTL_MS) return this.#seasons.list
+    const seasons = [...(await this.#api.fetchSeasons())].sort((a, b) => Date.parse(a.startDate) - Date.parse(b.startDate))
+    const active = seasons.find((s) => s.isActive) ?? seasons.at(-1)
     if (!active) throw new Error('No seasons listed on the site')
-    this.#season = { key: `season${active.id}`, at: Date.now() }
-    return this.#season.key
+    const list: Seasons = {
+      all: seasons.map((s) => ({ key: `season${s.id}`, endsAt: s.endDate ? Date.parse(s.endDate) : null })),
+      active: `season${active.id}`,
+    }
+    this.#seasons = { list, at: Date.now() }
+    return list
   }
 }
+
+export type Seasons = { all: Array<{ key: string; endsAt: number | null }>; active: string }

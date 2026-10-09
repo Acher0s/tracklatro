@@ -6,6 +6,7 @@ import { Directory } from './directory.ts'
 import { Predictor } from './predict.ts'
 import { ResultSource } from './results.ts'
 import { applySpeed, isSpeed } from './speed.ts'
+import { StatsService } from './stats.ts'
 import { adaptiveMatchTimeout, Tracker } from './tracker.ts'
 
 const config = loadConfig()
@@ -43,7 +44,8 @@ const tracker = new Tracker({
 })
 const directory = new Directory({ api, tracker, queueId: config.queueId })
 const predictor = new Predictor({ api, config, store, tracker, directory })
-const bot = new Bot({ config, store, tracker, api, predictor, directory })
+const stats = new StatsService({ api, store, results, tracker })
+const bot = new Bot({ config, store, tracker, api, predictor, directory, stats })
 
 tracker.on('queue_join', (e) => console.log(`[event] queue_join ${e.playerId}`))
 tracker.on('queue_leave', (e) => console.log(`[event] queue_leave ${e.playerId}`))

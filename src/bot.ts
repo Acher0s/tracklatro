@@ -5,6 +5,7 @@ import {
   Client,
   DiscordAPIError,
   Events,
+  EmbedBuilder,
   escapeMarkdown,
   GatewayIntentBits,
   InteractionContextType,
@@ -22,6 +23,7 @@ import type { Directory } from './directory.ts'
 import { Emojis } from './emoji.ts'
 import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
 import { SETUP_COMMAND, ServerFeatures } from './server.ts'
+import { type StatsService, statsText } from './stats.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
@@ -73,6 +75,9 @@ const COMMANDS = [
   command('matchup', 'How long until you could queue into a player, and who they would likely get').addStringOption(
     playerOption('Player you want to play')
   ),
+  command('stats', "A player's ranked stats over all seasons")
+    .addStringOption(playerOption('Player to look up'))
+    .addBooleanOption((o) => o.setName('public').setDescription('Post it for everyone in the channel (default: only you)')),
   command('about', 'How tracklatro works and what it is tracking'),
   SETUP_COMMAND,
 ]
@@ -85,6 +90,7 @@ export class Bot {
   readonly #api: Api
   readonly #predictor: Predictor
   readonly #directory: Directory
+  readonly #stats: StatsService
   readonly #emojis = new Emojis()
   /** 🟢/🟡/⚪ color of "queued" posts, following each player's queue session. */
   readonly #queuePosts: QueuePosts
@@ -99,6 +105,7 @@ export class Bot {
     api: Api
     predictor: Predictor
     directory: Directory
+    stats: StatsService
   }) {
     this.#cfg = opts.config
     this.#store = opts.store
@@ -106,6 +113,7 @@ export class Bot {
     this.#api = opts.api
     this.#predictor = opts.predictor
     this.#directory = opts.directory
+    this.#stats = opts.stats
     this.#queuePosts = new QueuePosts(this.#store, (channelId, messageId, content) =>
       this.#editMessage(channelId, messageId, content)
     )
@@ -567,6 +575,53 @@ export class Bot {
           content: [header, ...this.#forecastLines(forecast.base, forecast.viewers.get(i.user.id))].join('\n'),
           allowedMentions: { parse: [] },
         })
+      }
+
+      case 'stats': {
+        const id = this.#resolvePlayer(i.options.getString('player', true))
+        if (!id) return reply('Unknown player. Pick a suggestion or paste a user ID.')
+        const isPublic = i.options.getBoolean('public') ?? false
+        await i.deferReply(isPublic ? {} : { flags: MessageFlags.Ephemeral })
+        await this.#named([id])
+        const label = this.#label(id)
+        const firstTime = this.#stats.needsBackfill(id)
+        if (firstTime) {
+          await i.editReply({
+            content: `⏳ Fetching ${label}'s ranked history from all seasons. First time only, this can take a bit…`,
+            allowedMentions: { parse: [] },
+          })
+        }
+        let lastProgress = Date.now()
+        let note = ''
+        try {
+          await this.#stats.sync(id, (p) => {
+            if (!firstTime || Date.now() - lastProgress < 2_500) return
+            lastProgress = Date.now()
+            void i
+              .editReply({
+                content: `⏳ Fetching ${label}'s ranked history… season ${p.seasonIndex}/${p.seasons}, page ${p.page}/${p.pages}`,
+                allowedMentions: { parse: [] },
+              })
+              .catch(() => {})
+          })
+        } catch (err) {
+          console.warn('[stats] history sync failed:', err)
+          note = "\n-# ⚠️ Couldn't reach the site's match history just now; these stats may be incomplete."
+        }
+        const viewerRanked = (await this.#predictor.mmrs([i.user.id])).get(i.user.id) != null
+        const s = this.#stats.stats(id, i.user.id, this.#cfg.statsTimeZone)
+        const text = statsText(s, {
+          deckEmoji: (deck) => this.#emojis.get('deck', deck),
+          viewerRanked,
+          isSelf: id === i.user.id,
+        })
+        const embed = new EmbedBuilder()
+          .setTitle(`📊 ${this.#name(id)} · ranked stats`)
+          .setURL(`${this.#cfg.siteUrl}/players/${id}`)
+          .setDescription(`${text.description}${note}`)
+          .setFooter({ text: text.footer })
+          .setColor(0x5865f2)
+        return i.editReply({ content: '', embeds: [embed], allowedMentions: { parse: [] } })
       }
 
       case 'about': {

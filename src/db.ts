@@ -18,6 +18,23 @@ export function describeMask(mask: number): string {
 
 export type Subscription = { user_id: string; target_id: string; mask: number; created_at: number }
 
+/** One ranked game from one player's side. */
+export type GameRow = {
+  player_id: string
+  match_id: number
+  played_at: number
+  opponent_id: string
+  result: 'win' | 'loss' | 'tie'
+  /** null when only known from the opponent's side. */
+  mmr_change: number | null
+  deck: string | null
+  stake: string | null
+  /** 'season7', … ('' if unknown). Old seasons number their games differently, so ids are per season. */
+  season: string
+  /** Only for games the bot watched (the site's history has no game length). */
+  duration_ms: number | null
+}
+
 export type QueuePost = {
   player_id: string
   channel_id: string
@@ -63,6 +80,26 @@ export class Store {
         PRIMARY KEY (player_a, player_b, started_at)
       );
       CREATE INDEX IF NOT EXISTS matches_started ON matches (started_at DESC);
+      CREATE TABLE IF NOT EXISTS games (
+        player_id   TEXT    NOT NULL,
+        match_id    INTEGER NOT NULL,
+        played_at   INTEGER NOT NULL,
+        opponent_id TEXT    NOT NULL,
+        result      TEXT    NOT NULL,
+        mmr_change  REAL,
+        deck        TEXT,
+        stake       TEXT,
+        season      TEXT    NOT NULL,
+        duration_ms INTEGER,
+        PRIMARY KEY (player_id, season, match_id)
+      );
+      CREATE TABLE IF NOT EXISTS history_sync (
+        player_id TEXT    NOT NULL,
+        season    TEXT    NOT NULL,
+        complete  INTEGER NOT NULL,
+        synced_at INTEGER NOT NULL,
+        PRIMARY KEY (player_id, season)
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -200,6 +237,75 @@ export class Store {
             .all(playerId, playerId, limit)
         : this.#db.prepare('SELECT * FROM matches ORDER BY started_at DESC LIMIT ?').all(limit)
     ) as MatchLogRow[]
+  }
+
+  // -------------------------------------------------------------------- games
+
+  /**
+   * Stores ranked games (one row per player per game). A row seen again keeps
+   * what it already knew where the new copy doesn't know better: a game the
+   * bot watched has a duration the site's history lacks, and the site's copy
+   * has the MMR change a mirrored row (from the opponent's side) lacks.
+   */
+  upsertGames(rows: GameRow[]) {
+    const stmt = this.#db.prepare(
+      `INSERT INTO games (player_id, match_id, played_at, opponent_id, result, mmr_change, deck, stake, season, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (player_id, season, match_id) DO UPDATE SET
+         played_at   = excluded.played_at,
+         opponent_id = excluded.opponent_id,
+         result      = excluded.result,
+         mmr_change  = COALESCE(excluded.mmr_change, games.mmr_change),
+         deck        = COALESCE(excluded.deck, games.deck),
+         stake       = COALESCE(excluded.stake, games.stake),
+         duration_ms = COALESCE(games.duration_ms, excluded.duration_ms)`
+    )
+    this.#db.exec('BEGIN')
+    try {
+      for (const r of rows) {
+        stmt.run(r.player_id, r.match_id, r.played_at, r.opponent_id, r.result, r.mmr_change, r.deck, r.stake, r.season, r.duration_ms)
+      }
+      this.#db.exec('COMMIT')
+    } catch (err) {
+      this.#db.exec('ROLLBACK')
+      throw err
+    }
+  }
+
+  gamesOf(playerId: string): GameRow[] {
+    return this.#db.prepare('SELECT * FROM games WHERE player_id = ? ORDER BY played_at').all(playerId) as GameRow[]
+  }
+
+  /**
+   * Lengths of a player's ranked games that the bot watched: stored with the
+   * game, or from the match log (games watched before stats existed).
+   */
+  gameDurations(playerId: string): number[] {
+    const rows = this.#db
+      .prepare(
+        // Match log ids are the queue bot's (current seasons); old seasons never join.
+        `SELECT COALESCE(g.duration_ms, m.ended_at - m.started_at) AS d
+         FROM games g LEFT JOIN matches m ON m.match_id = g.match_id AND m.winner_id IS NOT NULL
+         WHERE g.player_id = ?`
+      )
+      .all(playerId) as Array<{ d: number | null }>
+    return rows.map((r) => r.d).filter((d): d is number => d !== null && d > 0)
+  }
+
+  historySync(playerId: string, season: string): { complete: boolean; synced_at: number } | undefined {
+    const row = this.#db
+      .prepare('SELECT complete, synced_at FROM history_sync WHERE player_id = ? AND season = ?')
+      .get(playerId, season) as { complete: number; synced_at: number } | undefined
+    return row && { complete: row.complete === 1, synced_at: row.synced_at }
+  }
+
+  setHistorySync(playerId: string, season: string, syncedAt: number) {
+    this.#db
+      .prepare(
+        `INSERT INTO history_sync (player_id, season, complete, synced_at) VALUES (?, ?, 1, ?)
+         ON CONFLICT (player_id, season) DO UPDATE SET complete = 1, synced_at = excluded.synced_at`
+      )
+      .run(playerId, season, syncedAt)
   }
 
   // ----------------------------------------------------------------- settings
