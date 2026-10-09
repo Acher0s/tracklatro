@@ -1,5 +1,7 @@
 import {
+  ActionRowBuilder,
   ApplicationIntegrationType,
+  AttachmentBuilder,
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   Client,
@@ -13,6 +15,8 @@ import {
   MessageFlags,
   SlashCommandBuilder,
   type SlashCommandStringOption,
+  type StringSelectMenuInteraction,
+  StringSelectMenuBuilder,
 } from 'discord.js'
 import { fileURLToPath } from 'node:url'
 import type { Api } from './api.ts'
@@ -23,12 +27,16 @@ import type { Directory } from './directory.ts'
 import { Emojis } from './emoji.ts'
 import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
 import { SETUP_COMMAND, ServerFeatures } from './server.ts'
-import { type StatsService, statsText } from './stats.ts'
-import { isValidTimeZone, localTime, suggestTimeZones } from './timezones.ts'
+import { mmrByHourSvg, renderPng } from './charts.ts'
+import { hourOfDay, type StatsService, statsText } from './stats.ts'
+import { isValidTimeZone, localTime, quickPickZones, suggestTimeZones } from './timezones.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
 const ts = (ms: number, style: 'R' | 't' | 'f' = 'R') => `<t:${Math.floor(ms / 1000)}:${style}>`
+
+/** Custom id of the "what time is it for you?" picker under /stats (`…:<player id>`). */
+const TZ_PICKER = 'tracklatro:tz'
 
 const NOTIFY_CHOICES = [
   { name: 'Everything (queue, match found, result)', value: 'all' },
@@ -151,6 +159,7 @@ export class Bot {
       try {
         if (i.isAutocomplete()) await this.#autocomplete(i)
         else if (i.isButton()) await this.#server.handleButton(i)
+        else if (i.isStringSelectMenu() && i.customId.startsWith(TZ_PICKER)) await this.#onTimeZonePick(i)
         else if (i.isChatInputCommand() && i.commandName === 'setup') await this.#server.handleSetup(i)
         else if (i.isChatInputCommand()) await this.#command(i)
       } catch (err) {
@@ -628,24 +637,7 @@ export class Bot {
           console.warn('[stats] history sync failed:', err)
           note = "\n-# ⚠️ Couldn't reach the site's match history just now; these stats may be incomplete."
         }
-        const viewerRanked = (await this.#predictor.mmrs([i.user.id])).get(i.user.id) != null
-        // Times in the viewer's own time zone if they set one (Discord doesn't tell bots).
-        const ownZone = this.#store.getUserSetting(i.user.id, 'timezone')
-        const s = this.#stats.stats(id, i.user.id, ownZone ?? this.#cfg.statsTimeZone)
-        const text = statsText(s, {
-          deckEmoji: (deck) => this.#emojis.get('deck', deck),
-          stakeEmoji: (stake) => this.#emojis.get('stake', stake),
-          viewerRanked,
-          isSelf: id === i.user.id,
-        })
-        if (!ownZone) note += `\n-# Times are in ${this.#cfg.statsTimeZone}. Use /timezone to see them in yours.`
-        const embed = new EmbedBuilder()
-          .setTitle(`📊 ${this.#name(id)} · ranked stats`)
-          .setURL(`${this.#cfg.siteUrl}/players/${id}`)
-          .setDescription(`${text.description}${note}`)
-          .setFooter({ text: text.footer })
-          .setColor(0x5865f2)
-        return i.editReply({ content: '', embeds: [embed], allowedMentions: { parse: [] } })
+        return i.editReply({ content: '', ...(await this.#statsMessage(id, i.user.id, i.locale, note)) })
       }
 
       case 'about': {
@@ -667,6 +659,67 @@ export class Bot {
           ].join('\n')
         )
       }
+    }
+  }
+
+  /**
+   * The /stats embed (+ MMR-by-hour chart image) for a player, with times in
+   * the viewer's time zone. Discord doesn't tell bots a user's time zone, so
+   * viewers without one get a one-click "what time is it for you?" picker.
+   */
+  async #statsMessage(playerId: string, viewerId: string, locale: string, note = '') {
+    const viewerRanked = (await this.#predictor.mmrs([viewerId])).get(viewerId) != null
+    const ownZone = this.#store.getUserSetting(viewerId, 'timezone')
+    const s = this.#stats.stats(playerId, viewerId, ownZone ?? this.#cfg.statsTimeZone)
+    const text = statsText(s, {
+      deckEmoji: (deck) => this.#emojis.get('deck', deck),
+      stakeEmoji: (stake) => this.#emojis.get('stake', stake),
+      viewerRanked,
+      isSelf: playerId === viewerId,
+    })
+    if (!ownZone) note += `\n-# Times are in ${this.#cfg.statsTimeZone}. Pick your time below (or use /timezone) to see them in yours.`
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 ${this.#name(playerId)} · ranked stats`)
+      .setURL(`${this.#cfg.siteUrl}/players/${playerId}`)
+      .setDescription(`${text.description}${note}`)
+      .setFooter({ text: text.footer })
+      .setColor(0x5865f2)
+    const files: AttachmentBuilder[] = []
+    if (s.byHour.games) {
+      try {
+        const png = renderPng(mmrByHourSvg(s.byHour, hourOfDay(Date.now(), s.timeZone), s.timeZone))
+        files.push(new AttachmentBuilder(png, { name: 'mmr-by-hour.png' }))
+        embed.setImage('attachment://mmr-by-hour.png')
+      } catch (err) {
+        console.warn('[stats] chart rendering failed:', err)
+      }
+    }
+    const components = ownZone
+      ? []
+      : [
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`${TZ_PICKER}:${playerId}`)
+              .setPlaceholder('🕐 What time is it for you? (sets your time zone)')
+              .addOptions(quickPickZones(locale))
+          ),
+        ]
+    return { embeds: [embed], files, components, allowedMentions: { parse: [] as const } }
+  }
+
+  /** The "what time is it for you?" picker under /stats. */
+  async #onTimeZonePick(i: StringSelectMenuInteraction) {
+    const zone = i.values[0]
+    const playerId = i.customId.slice(TZ_PICKER.length + 1)
+    if (!zone || !isValidTimeZone(zone)) return
+    this.#store.setUserSetting(i.user.id, 'timezone', zone)
+    const saved = `Time zone set to **${zone}** (now ${localTime(zone)}). Change it any time with /timezone.`
+    // Your own (ephemeral) /stats: redraw it in your time. Someone else's public one stays as it is.
+    if (i.message.flags.has(MessageFlags.Ephemeral)) {
+      // attachments: [] drops the old chart image (edits keep attachments unless told otherwise).
+      await i.update({ content: saved, attachments: [], ...(await this.#statsMessage(playerId, i.user.id, i.locale)) })
+    } else {
+      await i.reply({ content: `${saved} Run /stats again to see it in your time.`, flags: MessageFlags.Ephemeral })
     }
   }
 

@@ -54,13 +54,19 @@ the "match found" message, because from their point of view that player did queu
 - **Record and win rate.**
 - **Average game length.** The site's history has no game length, so this only covers ranked games
   the bot watched from start to end, and says how many.
-- **Win rate by time of day,** as a 24-hour chart with ▲ at the current hour, in the viewer's time
-  zone. Discord doesn't tell bots a user's time zone, so users set it once with `/timezone`. Until
-  they do, it's `STATS_TIMEZONE`, with a hint.
-  A raw per-hour win rate is mostly noise: one game in a slot shows as 0% or 100%. So each hour pools
-  its neighbours (± 1 h, wrapping around midnight) and is shrunk toward the player's overall win rate
-  by 10 virtual games: `(wins + 10 × avg) / (games + 10)`. Hours with fewer than 5 pooled games show
-  `·`. The summary line gives the best and worst hour and the current one, relative to their average.
+- **MMR per game by time of day,** as a chart image: gains in green and losses in red, the current
+  hour highlighted. Opacity shows how much they play at that hour, relative to their busiest hour:
+  solid at the busiest one, mostly transparent where they hardly play. It uses MMR rather than win rate
+  because MMR change accounts for opponent strength: beating someone far below you barely counts.
+  Times are in the viewer's time zone. Discord doesn't tell bots a user's time zone, so users set it
+  once: `/stats` shows a **"what time is it for you?"** picker (the current time in each zone, one
+  click, and the stats redraw in their time), or use `/timezone`. Until then it's `STATS_TIMEZONE`.
+  A raw per-hour average is mostly noise: one big game can dominate a slot. So each hour pools its
+  neighbours (± 1 h, wrapping around midnight) and is shrunk toward the player's overall average by
+  10 virtual games: `(sum + 10 × avg) / (games + 10)`. Hours with fewer than 5 pooled games get a dot.
+  The summary line gives the best and worst hour and the current one.
+  The chart is drawn as SVG and rendered to PNG on the bot itself (`@resvg/resvg-js`), in Balatro's
+  pixel font [m6x11](https://managore.itch.io/m6x11) by Daniel Linssen, which is bundled.
 - **Decks and stakes, best to worst,** without Cocktail Deck and without Red, Orange and Blue Stake,
   with win rate and game count. They're ranked by the
   same shrunk win rate, so a deck won once doesn't outrank one at 75% over a hundred games.
@@ -274,6 +280,7 @@ npm run dev       # restart on file changes
 | `src/db.ts` | SQLite: subscriptions + match log |
 | `src/bot.ts` | Discord commands, DMs, feed |
 | `src/server.ts` | `/setup`: widgets, results channel, role picker, win-streak pings |
-| `src/stats.ts` | `/stats`: stored ranked games, history sync, stats and time-of-day chart |
+| `src/stats.ts` | `/stats`: stored ranked games, history sync, stats, MMR by time of day |
+| `src/charts.ts` | Chart images (SVG → PNG) |
 | `src/widgets.ts` | Widget and alert content (pure, tested) |
 | `src/queue-posts.ts` | 🟢/🟡/⚪ coloring of "queued" posts |

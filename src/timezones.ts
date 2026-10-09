@@ -48,6 +48,66 @@ const LOCALE_GUESSES: Record<string, string[]> = {
   'zh-TW': ['Asia/Taipei'],
 }
 
+/** A zone's current UTC offset in minutes (120 for CEST); follows daylight saving. */
+export function utcOffsetMinutes(zone: string, now = Date.now()): number {
+  const name =
+    new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' })
+      .formatToParts(now)
+      .find((p) => p.type === 'timeZoneName')?.value ?? 'GMT'
+  const m = /GMT([+-])(\d{2}):(\d{2})/.exec(name)
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0
+}
+
+/** "UTC+2", "UTC-3:30", "UTC". */
+export function offsetLabel(minutes: number): string {
+  if (minutes === 0) return 'UTC'
+  const abs = Math.abs(minutes)
+  return `UTC${minutes < 0 ? '-' : '+'}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, '0')}` : ''}`
+}
+
+/** Well-known cities, preferred as the zone for their offset. */
+const REPRESENTATIVES = [
+  'Pacific/Honolulu', 'America/Anchorage', 'America/Los_Angeles', 'America/Denver', 'America/Chicago',
+  'America/New_York', 'America/Halifax', 'America/Sao_Paulo', 'America/Argentina/Buenos_Aires',
+  'Atlantic/South_Georgia', 'Atlantic/Azores', 'Europe/London', 'Europe/Brussels', 'Europe/Paris',
+  'Europe/Berlin', 'Europe/Athens', 'Europe/Helsinki', 'Europe/Istanbul', 'Europe/Moscow', 'Asia/Dubai',
+  'Asia/Karachi', 'Asia/Kolkata', 'Asia/Calcutta', 'Asia/Dhaka', 'Asia/Bangkok', 'Asia/Shanghai', 'Asia/Singapore',
+  'Asia/Tokyo', 'Australia/Brisbane', 'Australia/Sydney', 'Pacific/Noumea', 'Pacific/Auckland',
+  'Pacific/Tongatapu',
+]
+
+/**
+ * One choice per current UTC offset, for a "what time is it for you?" picker:
+ * whole hours from UTC-10 to UTC+13 plus India's UTC+5:30 (25, Discord's
+ * maximum), each as a real zone (so daylight saving keeps working), preferring
+ * zones that fit the user's Discord language, then well-known cities.
+ */
+export function quickPickZones(
+  locale: string | undefined,
+  now = Date.now()
+): Array<{ label: string; description: string; value: string }> {
+  const byOffset = new Map<number, string[]>()
+  for (const zone of ALL_ZONES) {
+    if (!zone.includes('/') || zone.startsWith('Etc/')) continue
+    const offset = utcOffsetMinutes(zone, now)
+    const list = byOffset.get(offset) ?? []
+    list.push(zone)
+    byOffset.set(offset, list)
+  }
+  const guesses = (locale && (LOCALE_GUESSES[locale] ?? LOCALE_GUESSES[locale.split('-')[0]!])) || []
+  const offsets = [...Array.from({ length: 24 }, (_, i) => (i - 10) * 60), 330].sort((a, b) => a - b)
+  const out: Array<{ label: string; description: string; value: string }> = []
+  for (const offset of offsets) {
+    const zones = byOffset.get(offset)
+    if (!zones?.length) continue
+    const zone =
+      guesses.find((z) => zones.includes(z)) ?? REPRESENTATIVES.find((z) => zones.includes(z)) ?? zones[0]!
+    const city = (zone.split('/').at(-1) ?? zone).replace(/_/g, ' ')
+    out.push({ label: `${localTime(zone, now)} · ${city}`, description: `${offsetLabel(offset)} · ${zone}`, value: zone })
+  }
+  return out
+}
+
 /** Up to 25 autocomplete choices: matches for what's typed, or guesses for the locale. */
 export function suggestTimeZones(query: string, locale: string | undefined, now = Date.now()): Array<{ name: string; value: string }> {
   const q = query.trim().toLowerCase().replace(/[\s_]+/g, ' ')

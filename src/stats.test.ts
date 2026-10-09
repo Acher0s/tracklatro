@@ -6,15 +6,15 @@ import type { ResultSource, Seasons } from './results.ts'
 import {
   bar,
   computeStats,
-  hourChart,
   hourOfDay,
   isRanked,
+  mmrByHour,
+  mmrByHourSummary,
   rowsFromResult,
+  signed,
   StatsService,
   statsText,
   syncPlan,
-  timeOfDay,
-  timeOfDaySummary,
 } from './stats.ts'
 import type { TrackedMatch, Tracker } from './tracker.ts'
 
@@ -132,40 +132,30 @@ test('hourOfDay respects the time zone', () => {
   assert.equal(hourOfDay(t, 'Europe/Brussels'), 0) // CEST, UTC+2
 })
 
-test('timeOfDay: a single game in an hour barely moves it; a real pattern shows', () => {
+test('mmrByHour: one lucky game barely moves an hour; a real pattern shows', () => {
   const at = (h: number, i: number) => Date.UTC(2026, 9, 1 + i, h, 30)
+  const rated = (id: number, mmr: number, played: number): GameRow => ({ ...row(id, mmr > 0 ? 'win' : 'loss', null, 'x', played), mmr_change: mmr })
   const games: GameRow[] = []
-  // 100 games around the clock at a 50% win rate...
-  for (let i = 0; i < 100; i++) games.push(row(i, i % 2 ? 'win' : 'loss', null, 'x', at(i % 24, i)))
-  // ...one lucky win at 3h (on top of the ones already there)...
-  games.push(row(1000, 'win', null, 'x', at(3, 50)))
+  // 100 games around the clock, breaking even (+10 / -10)...
+  for (let i = 0; i < 100; i++) games.push(rated(i, i % 2 ? 10 : -10, at(i % 24, i)))
+  // ...one huge win at 3h (beat someone far above them)...
+  games.push(rated(1000, 30, at(3, 50)))
   // ...and a real evening slump: 30 extra games around 21h, mostly lost.
-  for (let i = 0; i < 30; i++) games.push(row(2000 + i, i < 6 ? 'win' : 'loss', null, 'x', at(20 + (i % 3), 60 + i)))
-  const t = timeOfDay(games, 'UTC')
-  const wr = (h: number) => t.hours[h]!.winrate!
-  assert.ok(Math.abs(wr(3) - t.overall) < 0.06, `3h: ${wr(3)} vs overall ${t.overall}`) // one game: noise
-  assert.ok(wr(21) < t.overall - 0.12, `21h: ${wr(21)} vs overall ${t.overall}`) // pooled evidence: real
-  // An hour (and its neighbours) without enough games has no number.
-  const sparse = timeOfDay([row(1, 'win', null, 'x', at(10, 0))], 'UTC')
-  assert.equal(sparse.hours[10]!.winrate, null)
-})
-
-test('hourChart: 24 columns, scaled, ▲ under the current hour; summary names best/worst/now', () => {
-  const at = (h: number, i: number) => Date.UTC(2026, 9, 1 + i, h, 0)
-  const games: GameRow[] = []
-  for (let i = 0; i < 240; i++) {
-    const h = i % 24
-    games.push(row(i, h >= 18 && i % 3 ? 'win' : i % 2 ? 'win' : 'loss', null, 'x', at(h, i)))
-  }
-  const t = timeOfDay(games, 'UTC')
-  const lines = hourChart(t, 21)
-  assert.equal(lines.length, 6) // 4 rows + hour labels + now marker
-  for (const l of lines.slice(0, 4)) assert.equal([...l.slice(6)].length, 24)
-  assert.equal(lines[4], '      0     6     12    18   23')
-  assert.equal(lines[5]!.indexOf('▲'), 6 + 21)
-  const summary = timeOfDaySummary(t, 21)
-  assert.match(summary, /^Best around (18|19|20|21|22|23)h \(\+\d+%\) · worst around \d+h \(−\d+%\) · now \(21h\): \*\*\+\d+%\*\* over \d+ games$/)
-  assert.deepEqual(hourChart(timeOfDay([], 'UTC'), 0), [])
+  for (let i = 0; i < 30; i++) games.push(rated(2000 + i, i < 6 ? 10 : -10, at(20 + (i % 3), 60 + i)))
+  // Opponent-side rows without an MMR change are left out.
+  games.push({ ...row(3000, 'loss', null, 'x', at(21, 99)), mmr_change: null })
+  const t = mmrByHour(games, 'UTC')
+  const mmr = (h: number) => t.hours[h]!.mmr!
+  assert.equal(t.games, 131)
+  assert.ok(Math.abs(mmr(3) - t.overall) < 2, `3h: ${mmr(3)} vs overall ${t.overall}`) // one game: noise
+  assert.ok(mmr(21) < t.overall - 2.5, `21h: ${mmr(21)} vs overall ${t.overall}`) // pooled evidence: real
+  assert.equal(mmrByHour([{ ...row(1, 'win', null, 'x', at(10, 0)), mmr_change: 12 }], 'UTC').hours[10]!.mmr, null)
+  assert.match(
+    mmrByHourSummary(t, 21),
+    /^Best around \d+h \(\*\*\+\d+\.\d\*\* MMR\/game\) · worst around (20|21|22)h \(\*\*−\d+\.\d\*\*\) · now \(21h\): \*\*−\d+\.\d\*\* MMR\/game over \d+ games$/
+  )
+  assert.equal(signed(2.46), '+2.5')
+  assert.equal(signed(-0.04), '−0.0')
 })
 
 // ------------------------------------------------------------------ syncing

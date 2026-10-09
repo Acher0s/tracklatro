@@ -57,8 +57,8 @@ export type PlayerStats = {
   stakes: GroupStats[]
   /** The viewer's own record against this player, from the viewer's side. */
   vsViewer?: { wins: number; losses: number; winrate: number }
-  /** Win rate by hour of the day (see timeOfDay). */
-  byHour: TimeOfDay
+  /** MMR gained/lost per game by hour of the day (see mmrByHour). */
+  byHour: MmrByHour
   timeZone: string
 }
 
@@ -117,7 +117,7 @@ export function computeStats(games: GameRow[], durationsMs: number[], viewerId?:
     decks,
     stakes,
     vsViewer,
-    byHour: timeOfDay(games, timeZone),
+    byHour: mmrByHour(games, timeZone),
     timeZone,
   }
 }
@@ -131,113 +131,78 @@ export function hourOfDay(ms: number, timeZone: string): number {
 
 export type HourStat = {
   hour: number
-  /** Games started in this hour. */
+  /** Games (with a known MMR change) started in this hour. */
   games: number
   /** Games in the pooled window around it (this hour ± `window`). */
   pooled: number
-  /** Smoothed win rate, or null when there's too little data to say. */
-  winrate: number | null
+  /** Smoothed average MMR change per game, or null when there's too little data to say. */
+  mmr: number | null
 }
 
-export type TimeOfDay = { overall: number; hours: HourStat[] }
+export type MmrByHour = {
+  /** Average MMR change per game over all their games. */
+  overall: number
+  games: number
+  hours: HourStat[]
+}
 
 /**
- * Win rate by hour of the day, made robust against small samples:
+ * Average MMR gained or lost per game by hour of the day. MMR change already
+ * weighs opponent strength (beating a much higher player gains more, beating
+ * a much lower one barely counts), unlike a plain win rate. Made robust
+ * against small samples:
  *  - each hour pools the games of its neighbours too (± `window` hours,
  *    wrapping around midnight), since hour boundaries are arbitrary;
- *  - the pooled rate is shrunk towards the player's overall win rate by
- *    `prior` virtual games ((wins + prior·overall) / (games + prior)), so a
- *    slot with a handful of games barely moves from their average while one
- *    with dozens shows a real tendency;
+ *  - the pooled average is shrunk towards the player's overall average by
+ *    `prior` virtual games ((sum + prior·overall) / (games + prior)), so a
+ *    slot with a handful of games barely moves while one with dozens shows a
+ *    real tendency;
  *  - hours with fewer than `minGames` pooled games get no number at all.
+ * Games only known from the opponent's side (no MMR change yet) are skipped.
  */
-export function timeOfDay(
+export function mmrByHour(
   games: GameRow[],
   timeZone: string,
   opts: { window?: number; prior?: number; minGames?: number } = {}
-): TimeOfDay {
+): MmrByHour {
   const { window = 1, prior = 10, minGames = 5 } = opts
-  const decided = games.filter((g) => g.result !== 'tie')
-  const overall = rate(decided.filter((g) => g.result === 'win').length, decided.length)
-  const perHour = Array.from({ length: 24 }, () => ({ games: 0, wins: 0 }))
-  for (const g of decided) {
+  const rated = games.filter((g) => g.mmr_change !== null)
+  const total = rated.reduce((sum, g) => sum + g.mmr_change!, 0)
+  const overall = rated.length ? total / rated.length : 0
+  const perHour = Array.from({ length: 24 }, () => ({ games: 0, sum: 0 }))
+  for (const g of rated) {
     const h = perHour[hourOfDay(g.played_at, timeZone)]!
     h.games++
-    if (g.result === 'win') h.wins++
+    h.sum += g.mmr_change!
   }
   const hours = perHour.map((h, hour) => {
     let pooled = 0
-    let wins = 0
+    let sum = 0
     for (let d = -window; d <= window; d++) {
       const n = perHour[(hour + d + 24) % 24]!
       pooled += n.games
-      wins += n.wins
+      sum += n.sum
     }
-    return {
-      hour,
-      games: h.games,
-      pooled,
-      winrate: pooled >= minGames ? (wins + prior * overall) / (pooled + prior) : null,
-    }
+    return { hour, games: h.games, pooled, mmr: pooled >= minGames ? (sum + prior * overall) / (pooled + prior) : null }
   })
-  return { overall, hours }
+  return { overall, games: rated.length, hours }
 }
 
-const BLOCKS = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
-
-/**
- * A 24-column bar chart (one column per hour) for a code block, scaled
- * between the lowest and highest smoothed win rate so differences are
- * visible; hours without enough data are a `·`; ▲ marks the current hour.
- */
-export function hourChart(t: TimeOfDay, nowHour: number, rows = 4): string[] {
-  const known = t.hours.filter((h) => h.winrate !== null).map((h) => h.winrate!)
-  if (!known.length) return []
-  let lo = Math.min(...known, t.overall)
-  let hi = Math.max(...known, t.overall)
-  if (hi - lo < 0.02) {
-    // Practically flat: give it some headroom so it doesn't look dramatic.
-    lo -= 0.02
-    hi += 0.02
-  }
-  const levels = rows * 8
-  const height = (wr: number) => Math.max(1, Math.round(((wr - lo) / (hi - lo)) * levels))
-  const label = (r: number) => `${Math.round(r * 100)}%`.padStart(4)
-  const lines: string[] = []
-  for (let row = rows - 1; row >= 0; row--) {
-    let line = ''
-    for (const h of t.hours) {
-      if (h.winrate === null) {
-        line += row === 0 ? '·' : ' '
-        continue
-      }
-      const fill = height(h.winrate) - row * 8
-      line += fill >= 8 ? '█' : fill <= 0 ? ' ' : BLOCKS[fill]
-    }
-    const axis = row === rows - 1 ? `${label(hi)} ┤` : row === 0 ? `${label(lo)} ┤` : '     │'
-    lines.push(`${axis}${line}`)
-  }
-  lines.push(`      ${'0     6     12    18   23'}`)
-  lines.push(`      ${' '.repeat(nowHour)}▲ now`)
-  return lines
+/** "+3.1" / "−2.4". */
+export function signed(v: number): string {
+  return `${v < 0 ? '−' : '+'}${Math.abs(v).toFixed(1)}`
 }
 
-/** "Best around 21h (+7%) · worst around 4h (−9%) · now (21h): +5% over 38 games". */
-export function timeOfDaySummary(t: TimeOfDay, nowHour: number): string {
-  const known = t.hours.filter((h) => h.winrate !== null)
+/** "Best around 21h (+3.1 MMR/game) · worst around 4h (−2.4) · now (17h): +0.8 MMR/game over 132 games". */
+export function mmrByHourSummary(t: MmrByHour, nowHour: number): string {
+  const known = t.hours.filter((h) => h.mmr !== null)
   if (!known.length) return 'Not enough games yet to tell.'
-  const diff = (wr: number) => {
-    const d = Math.round((wr - t.overall) * 100)
-    return d > 0 ? `+${d}%` : d < 0 ? `−${-d}%` : '±0%'
-  }
-  const best = known.reduce((a, b) => (b.winrate! > a.winrate! ? b : a))
-  const worst = known.reduce((a, b) => (b.winrate! < a.winrate! ? b : a))
+  const best = known.reduce((a, b) => (b.mmr! > a.mmr! ? b : a))
+  const worst = known.reduce((a, b) => (b.mmr! < a.mmr! ? b : a))
   const now = t.hours[nowHour]!
   const nowText =
-    now.winrate === null
-      ? `now (${nowHour}h): too few games`
-      : `now (${nowHour}h): **${diff(now.winrate)}** over ${now.pooled} games`
-  return `Best around ${best.hour}h (${diff(best.winrate!)}) · worst around ${worst.hour}h (${diff(worst.winrate!)}) · ${nowText}`
+    now.mmr === null ? `now (${nowHour}h): too few games` : `now (${nowHour}h): **${signed(now.mmr)}** MMR/game over ${now.pooled} games`
+  return `Best around ${best.hour}h (**${signed(best.mmr!)}** MMR/game) · worst around ${worst.hour}h (**${signed(worst.mmr!)}**) · ${nowText}`
 }
 
 // ---------------------------------------------------------------- rendering
@@ -279,9 +244,9 @@ export function statsText(
     }
   }
   const nowHour = hourOfDay(opts.now ?? Date.now(), s.timeZone)
-  const chart = hourChart(s.byHour, nowHour)
-  if (chart.length) {
-    lines.push('', `**Win rate by time of day** (${s.timeZone}, smoothed)`, '```', ...chart, '```', timeOfDaySummary(s.byHour, nowHour))
+  if (s.byHour.games) {
+    // The chart itself is an image under the embed (see charts.ts).
+    lines.push('', `**MMR per game by time of day** (${s.timeZone}, smoothed, chart below)`, mmrByHourSummary(s.byHour, nowHour))
   }
   const section = (title: string, groups: GroupStats[], emoji: (name: string) => string, suffix: RegExp) => {
     if (!groups.length) return
