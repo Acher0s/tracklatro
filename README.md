@@ -10,11 +10,10 @@ Requires **Node.js 24+** (it runs the TypeScript directly and uses the built-in 
 
 1. Create an application at <https://discord.com/developers/applications>, add a bot, and copy its token.
    No privileged intents are needed.
-2. Invite it with the `bot` + `applications.commands` scopes and the **View Channels**, **Send
-   Messages**, **Embed Links**, **Attach Files** and **Manage Roles** permissions:
-   `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=268487680`.
-   Optionally enable **User Install** so people can use the commands from their DMs without sharing a
-   server with the bot.
+2. Add it to a server with the `bot` + `applications.commands` scopes and the **View Channels**,
+   **Send Messages**, **Embed Links**, **Attach Files** and **Manage Roles** permissions. Once it runs,
+   `/install` gives the links. Optionally enable **User Install** so people can use the commands
+   anywhere, including DMs and servers the bot isn't in.
 3. Configure and run:
 
 ```bash
@@ -24,6 +23,8 @@ npm start
 ```
 
 Set `DISCORD_GUILD_ID` while developing so slash commands register instantly in that one server.
+Commands registered that way exist **only** in that server, not in DMs. Leave it empty in production;
+the bot then registers everywhere and removes the server-only copies (and vice versa).
 Set `FEED_CHANNEL_ID` for a public channel feed of queue joins and leaves, matches, and results for
 the top players.
 
@@ -41,6 +42,7 @@ the top players.
 | `/stats player [public]` | Ranked stats over all seasons (see below) |
 | `/rivals player [public]` | Nemeses (most MMR lost to), favourite victims (most MMR won from), most played opponents |
 | `/timezone [zone]` | Your time zone for `/stats` (suggestions show each zone's current time) |
+| `/install` | Buttons to add tracklatro to your account (use it anywhere) or to a server |
 | `/about` | What's tracked and how many requests the bot has made |
 | `/setup …` | Server channels: widgets, results, role picker, win-streak pings (see below) |
 

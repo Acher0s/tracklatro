@@ -1,5 +1,7 @@
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ApplicationIntegrationType,
   AttachmentBuilder,
   type AutocompleteInteraction,
@@ -35,6 +37,21 @@ import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
 const ts = (ms: number, style: 'R' | 't' | 'f' = 'R') => `<t:${Math.floor(ms / 1000)}:${style}>`
+
+/**
+ * Permissions the bot needs when added to a server: View Channels, Send
+ * Messages, Embed Links, Attach Files, Manage Roles (for the role picker).
+ */
+export const SERVER_PERMISSIONS = '268487680'
+
+/** OAuth links for /install: to the user's own account (commands anywhere) or to a server. */
+export function installLinks(applicationId: string): { user: string; server: string } {
+  const base = `https://discord.com/oauth2/authorize?client_id=${applicationId}`
+  return {
+    user: `${base}&integration_type=1&scope=applications.commands`,
+    server: `${base}&integration_type=0&scope=bot+applications.commands&permissions=${SERVER_PERMISSIONS}`,
+  }
+}
 
 /** How long autocomplete waits for the site's player search. */
 const AUTOCOMPLETE_SEARCH_MS = 1_500
@@ -97,6 +114,7 @@ const COMMANDS = [
   command('rivals', "A player's nemeses, favourite victims and most played opponents (ranked, all seasons)")
     .addStringOption(playerOption('Player to look up'))
     .addBooleanOption((o) => o.setName('public').setDescription('Post it for everyone in the channel (default: only you)')),
+  command('install', 'Add tracklatro to your account (use it anywhere) or to a server'),
   command('about', 'How tracklatro works and what it is tracking'),
   SETUP_COMMAND,
 ]
@@ -157,9 +175,18 @@ export class Bot {
     this.client.once(Events.ClientReady, async (c) => {
       console.log(`[bot] logged in as ${c.user.tag}`)
       const body = COMMANDS.map((cmd) => cmd.toJSON())
-      if (this.#cfg.guildId) await c.application.commands.set(body, this.#cfg.guildId)
-      else await c.application.commands.set(body)
-      console.log(`[bot] registered ${body.length} commands ${this.#cfg.guildId ? `in guild ${this.#cfg.guildId}` : 'globally'}`)
+      // Only one set may exist, or Discord shows stale or duplicate commands:
+      // server-only commands never appear in DMs, and an old global set
+      // lingers there after switching to server-only registration.
+      if (this.#cfg.guildId) {
+        await c.application.commands.set(body, this.#cfg.guildId)
+        await c.application.commands.set([])
+        console.log(`[bot] registered ${body.length} commands in guild ${this.#cfg.guildId} only (not in DMs; unset DISCORD_GUILD_ID for that)`)
+      } else {
+        await c.application.commands.set(body)
+        await Promise.all(c.guilds.cache.map((g) => g.commands.set([]).catch(() => {})))
+        console.log(`[bot] registered ${body.length} commands globally (servers and DMs)`)
+      }
       await this.#emojis
         .sync(c.application.emojis, fileURLToPath(new URL('../assets/emoji', import.meta.url)))
         .catch((err) => console.warn('[emoji] sync failed, using plain icons:', err))
@@ -647,6 +674,27 @@ export class Bot {
           .setFooter({ text: 'Ranked · all seasons · nemeses and victims need 3+ games against them' })
           .setColor(0xed4245)
         return i.editReply({ content: '', embeds: [embed], allowedMentions: { parse: [] } })
+      }
+
+      case 'install': {
+        const id = this.client.application?.id ?? this.client.user?.id
+        if (!id) return reply("Couldn't work out the install links right now; try again in a moment.")
+        const links = installLinks(id)
+        const embed = new EmbedBuilder()
+          .setTitle('📥 Get tracklatro')
+          .setDescription(
+            [
+              '**Add to my apps**: use the commands anywhere: in any server and in your DMs, even where the bot itself isn\'t a member. Notifications still arrive as DMs from the bot.',
+              '',
+              '**Add to a server**: for server admins. Adds the bot to a server, for the live feed, widgets, results channel and role pings (`/setup`).',
+            ].join('\n')
+          )
+          .setColor(0x5865f2)
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Add to my apps').setEmoji('👤').setURL(links.user),
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Add to a server').setEmoji('🏠').setURL(links.server)
+        )
+        return i.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral })
       }
 
       case 'about': {
