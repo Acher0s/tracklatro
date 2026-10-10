@@ -7,10 +7,10 @@ test('install links: to your own account, or to a server with the needed permiss
   assert.equal(l.user, 'https://discord.com/oauth2/authorize?client_id=123&integration_type=1&scope=applications.commands')
   assert.equal(
     l.server,
-    'https://discord.com/oauth2/authorize?client_id=123&integration_type=0&scope=bot+applications.commands&permissions=268487680'
+    'https://discord.com/oauth2/authorize?client_id=123&integration_type=0&scope=bot+applications.commands&permissions=268749824'
   )
-  // View Channels, Send Messages, Embed Links, Attach Files, Manage Roles.
-  assert.equal(1024 + 2048 + 16384 + 32768 + 268435456, 268487680)
+  // View Channels, Send Messages, Embed Links, Attach Files, Use External Emojis, Manage Roles.
+  assert.equal(1024 + 2048 + 16384 + 32768 + 262144 + 268435456, 268749824)
 })
 
 const url = 'https://balatromp.com/players/1'

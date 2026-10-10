@@ -11,7 +11,8 @@ Requires **Node.js 24+** (it runs the TypeScript directly and uses the built-in 
 1. Create an application at <https://discord.com/developers/applications>, add a bot, and copy its token.
    No privileged intents are needed.
 2. Add it to a server with the `bot` + `applications.commands` scopes and the **View Channels**,
-   **Send Messages**, **Embed Links**, **Attach Files** and **Manage Roles** permissions. Once it runs,
+   **Send Messages**, **Embed Links**, **Attach Files**, **Use External Emojis** and **Manage Roles**
+   permissions. Once it runs,
    `/install` gives the links. Optionally enable **User Install** so people can use the commands
    anywhere, including DMs and servers the bot isn't in.
 3. Configure and run:

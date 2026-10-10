@@ -40,9 +40,11 @@ const ts = (ms: number, style: 'R' | 't' | 'f' = 'R') => `<t:${Math.floor(ms / 1
 
 /**
  * Permissions the bot needs when added to a server: View Channels, Send
- * Messages, Embed Links, Attach Files, Manage Roles (for the role picker).
+ * Messages, Embed Links, Attach Files (charts), Use External Emojis (its own
+ * deck/stake emojis can count as external in a server, and would otherwise
+ * show as plain :names:), Manage Roles (role picker).
  */
-export const SERVER_PERMISSIONS = '268487680'
+export const SERVER_PERMISSIONS = '268749824'
 
 /** OAuth links for /install: to the user's own account (commands anywhere) or to a server. */
 export function installLinks(applicationId: string): { user: string; server: string } {
