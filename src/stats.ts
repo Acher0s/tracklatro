@@ -22,6 +22,7 @@ export function rowFromSite(g: SiteGame): GameRow {
     deck: g.deck,
     stake: g.stake,
     season: g.season ?? '',
+    opponent_name: g.opponentName,
     duration_ms: null,
   }
 }
@@ -57,6 +58,9 @@ export type PlayerStats = {
   stakes: GroupStats[]
   /** The viewer's own record against this player, from the viewer's side. */
   vsViewer?: { wins: number; losses: number; winrate: number }
+  /** The opponent they lost the most MMR to, and the one they won the most from (see pickNemesisAndVictim). */
+  nemesis?: Rival
+  victim?: Rival
   /** MMR gained/lost per game by hour of the day (see mmrByHour). */
   byHour: MmrByHour
   timeZone: string
@@ -117,9 +121,86 @@ export function computeStats(games: GameRow[], durationsMs: number[], viewerId?:
     decks,
     stakes,
     vsViewer,
+    ...pickNemesisAndVictim(computeRivals(games)),
     byHour: mmrByHour(games, timeZone),
     timeZone,
   }
+}
+
+// ------------------------------------------------------------------- rivals
+
+/** Record against one opponent, from the player's side. */
+export type Rival = {
+  id: string
+  /** Their name in the most recent game against them (from the site's history). */
+  name: string | null
+  games: number
+  wins: number
+  losses: number
+  /** MMR won (+) or lost (−) against them in total. */
+  netMmr: number
+}
+
+/** Record against every opponent (ties left out). */
+export function computeRivals(games: GameRow[]): Rival[] {
+  const byOpponent = new Map<string, Rival & { lastPlayed: number }>()
+  for (const g of games) {
+    if (g.result === 'tie') continue
+    const r = byOpponent.get(g.opponent_id) ?? {
+      id: g.opponent_id,
+      name: null,
+      games: 0,
+      wins: 0,
+      losses: 0,
+      netMmr: 0,
+      lastPlayed: 0,
+    }
+    r.games++
+    if (g.result === 'win') r.wins++
+    else r.losses++
+    r.netMmr += g.mmr_change ?? 0
+    if (g.opponent_name && g.played_at >= r.lastPlayed) {
+      r.name = g.opponent_name
+      r.lastPlayed = g.played_at
+    }
+    byOpponent.set(g.opponent_id, r)
+  }
+  return [...byOpponent.values()].map(({ lastPlayed: _, ...r }) => r)
+}
+
+/** Opponents need this many games to count as a nemesis / victim (one unlucky game isn't a rivalry). */
+const MIN_RIVAL_GAMES = 3
+
+/** Nemesis: lost the most MMR to; favourite victim: won the most MMR from. */
+export function pickNemesisAndVictim(rivals: Rival[], minGames = MIN_RIVAL_GAMES): { nemesis?: Rival; victim?: Rival } {
+  const eligible = rivals.filter((r) => r.games >= minGames)
+  const nemesis = eligible.filter((r) => r.netMmr < 0).sort((a, b) => a.netMmr - b.netMmr || b.games - a.games)[0]
+  const victim = eligible.filter((r) => r.netMmr > 0).sort((a, b) => b.netMmr - a.netMmr || b.games - a.games)[0]
+  return { nemesis, victim }
+}
+
+/** "2W – 9L · **−84.3** MMR". */
+export function rivalRecord(r: Rival): string {
+  return `${r.wins}W – ${r.losses}L · **${signed(r.netMmr)}** MMR`
+}
+
+/** /rivals: nemeses, favourite victims and most played opponents. */
+export function rivalsText(rivals: Rival[], label: (r: Rival) => string, top = 5): string {
+  const eligible = rivals.filter((r) => r.games >= MIN_RIVAL_GAMES)
+  const section = (title: string, list: Rival[]) =>
+    list.length ? ['', title, ...list.map((r, i) => `${i + 1}. ${label(r)} · ${r.games} games · ${rivalRecord(r)}`)] : []
+  const lines = [
+    ...section(
+      '😈 **Nemeses** (most MMR lost to)',
+      eligible.filter((r) => r.netMmr < 0).sort((a, b) => a.netMmr - b.netMmr).slice(0, top)
+    ),
+    ...section(
+      '🎯 **Favourite victims** (most MMR won from)',
+      eligible.filter((r) => r.netMmr > 0).sort((a, b) => b.netMmr - a.netMmr).slice(0, top)
+    ),
+    ...section('🔁 **Most played**', [...rivals].sort((a, b) => b.games - a.games || b.netMmr - a.netMmr).slice(0, top)),
+  ]
+  return lines.length ? lines.slice(1).join('\n') : '-# No ranked games found.'
 }
 
 // -------------------------------------------------------------- time of day
@@ -215,6 +296,16 @@ export function bar(ratio: number, width = 10): string {
   return '▰'.repeat(filled) + '▱'.repeat(width - filled)
 }
 
+/** "**Season standing:** #12 of 5,301 · **top 0.2%** · 1290 MMR". */
+export function standingLine(s: { rank: number; total: number; mmr?: number }): string {
+  const top = (s.rank / Math.max(s.total, s.rank)) * 100
+  const topText = top < 10 ? top.toFixed(1) : String(Math.round(top))
+  return (
+    `**Season standing:** #${s.rank.toLocaleString('en-US')} of ${s.total.toLocaleString('en-US')} · **top ${topText}%**` +
+    (s.mmr !== undefined ? ` · ${Math.round(s.mmr)} MMR` : '')
+  )
+}
+
 /**
  * Embed text for /stats. `viewerRanked`: the viewer is a ranked player
  * themselves (so "no games against them yet" is worth saying).
@@ -226,11 +317,16 @@ export function statsText(
     stakeEmoji: (stake: string) => string
     viewerRanked: boolean
     isSelf: boolean
+    /** How a rival is shown (linked name). */
+    rivalLabel?: (r: Rival) => string
+    /** Current season standing, if they're ranked this season. */
+    standing?: { rank: number; total: number; mmr?: number }
     now?: number
   }
 ): { description: string; footer: string } {
   if (s.games === 0) return { description: '-# No ranked games found.', footer: 'Ranked · all seasons · balatromp.com' }
   const lines = [
+    ...(opts.standing ? [standingLine(opts.standing)] : []),
     `**Record:** ${s.wins}W – ${s.losses}L · **${pct(s.winrate)}** winrate`,
     s.avgDurationMs !== null
       ? `**Avg game length:** ${formatDuration(s.avgDurationMs)} (from ${s.durationSamples} game${s.durationSamples === 1 ? '' : 's'} the bot watched)`
@@ -243,6 +339,9 @@ export function statsText(
       lines.push('**You vs them:** no ranked games against each other yet')
     }
   }
+  const rivalLabel = opts.rivalLabel ?? ((r: Rival) => `**${r.name ?? 'unknown player'}**`)
+  if (s.nemesis) lines.push(`**Nemesis:** ${rivalLabel(s.nemesis)} · ${rivalRecord(s.nemesis)}`)
+  if (s.victim) lines.push(`**Favourite victim:** ${rivalLabel(s.victim)} · ${rivalRecord(s.victim)}`)
   const nowHour = hourOfDay(opts.now ?? Date.now(), s.timeZone)
   if (s.byHour.games) {
     // The chart itself is an image under the embed (see charts.ts).
@@ -351,7 +450,9 @@ export class StatsService {
   async #sync(playerId: string, onProgress?: (p: SyncProgress) => void) {
     const { all, active } = await this.#results.seasons()
     const lastFull = this.#store.historySync(playerId, '*')
-    if (!lastFull || Date.now() - lastFull.synced_at > FULL_REFETCH_AFTER_MS) {
+    // Also refetch once if their games were stored before opponent names were kept.
+    const namesMissing = lastFull !== undefined && !this.#store.hasOpponentNames(playerId)
+    if (!lastFull || namesMissing || Date.now() - lastFull.synced_at > FULL_REFETCH_AFTER_MS) {
       // First time (or after a long downtime): the complete history in one request.
       onProgress?.({ season: 'all', seasonIndex: 1, seasons: 1, page: 1, pages: 1 })
       const startedAt = Date.now()
@@ -382,6 +483,11 @@ export class StatsService {
       } while (page <= pages)
       this.#store.setHistorySync(playerId, season, startedAt)
     }
+  }
+
+  /** Record against every opponent (call sync first). */
+  rivals(playerId: string): Rival[] {
+    return computeRivals(this.#store.gamesOf(playerId))
   }
 
   /** Stats for a player (call sync first), with the viewer's record against them. */

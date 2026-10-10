@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ApplicationIntegrationType,
   type ButtonInteraction,
   ButtonBuilder,
@@ -20,12 +21,18 @@ import {
 } from 'discord.js'
 import type { Config } from './config.ts'
 import type { Store } from './db.ts'
-import { applySpeed, describeSpeed, isSpeed } from './speed.ts'
+import type { Api, Popularity } from './api.ts'
+import { busiestHoursSvg, popularitySvg, renderPng } from './charts.ts'
 import type { Predictor } from './predict.ts'
+import type { ResultSource } from './results.ts'
+import { applySpeed, describeSpeed, isSpeed } from './speed.ts'
+import { hourOfDay } from './stats.ts'
 import type { Tracker } from './tracker.ts'
 import type { MatchOutcome, TrackedMatch } from './tracker.ts'
 import {
+  activitySummary,
   matchesWidget,
+  popularityFromCounts,
   queueWidget,
   type RoleAlerts,
   rolesWidget,
@@ -57,7 +64,33 @@ const S = {
   tiltMin: 'tilt_min',
   tiltWindow: 'tilt_window_minutes',
   pollSpeed: 'poll_speed',
+  activityChannel: 'activity_channel',
+  activityMessage: 'activity_message',
+  metaChannel: 'meta_channel',
+  metaMessage: 'meta_message',
 } as const
+
+const ACTIVITY_REFRESH_MS = 10 * 60_000
+const META_REFRESH_MS = 60 * 60_000
+/** When the site's popularity stats fail, wait this long before asking again (they're expensive for it). */
+const SITE_META_RETRY_MS = 6 * 3_600_000
+const C_BLURPLE = 0x5865f2
+
+/** "Yellow Deck" / "yellow" / "Cocktail Deck ~ …" → "yellow" / "cocktail"; "Spectral+ Stake" → "spectral+". */
+export function pickName(raw: string): string {
+  return raw
+    .replace(/\s*~.*$/, '')
+    .replace(/\s+(deck|stake)$/i, '')
+    .trim()
+    .toLowerCase()
+}
+
+/** Adds up counts whose names normalise to the same deck/stake. */
+function mergeCounts(counts: Array<{ name: string; games: number }>): Array<{ name: string; games: number }> {
+  const merged = new Map<string, number>()
+  for (const c of counts) merged.set(c.name, (merged.get(c.name) ?? 0) + c.games)
+  return [...merged].map(([name, games]) => ({ name, games })).sort((a, b) => b.games - a.games)
+}
 
 /** Role picker buttons: the streak role, and one per tilt role (`…:tilt:<role id>`). */
 const STREAK_BUTTON = 'tracklatro:role:streak'
@@ -102,6 +135,18 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
       .setName('results')
       .setDescription('Post finished matches and their results')
       .addChannelOption(channelOption('Channel for results'))
+  )
+  .addSubcommand((s) =>
+    s
+      .setName('activity')
+      .setDescription('Ranked activity: matches started per hour/day/week/month and when the queue is busiest')
+      .addChannelOption(channelOption('Channel for the widget'))
+  )
+  .addSubcommand((s) =>
+    s
+      .setName('meta')
+      .setDescription('Most picked decks and stakes this ranked season (charts)')
+      .addChannelOption(channelOption('Channel for the widget'))
   )
   .addSubcommand((s) =>
     s
@@ -159,7 +204,9 @@ export const SETUP_COMMAND = new SlashCommandBuilder()
             { name: 'Results channel', value: 'results' },
             { name: 'Role picker', value: 'roles' },
             { name: 'Win-streak pings', value: 'streak' },
-            { name: 'Tilt-queue pings', value: 'tilt' }
+            { name: 'Tilt-queue pings', value: 'tilt' },
+            { name: 'Activity widget', value: 'activity' },
+            { name: 'Meta widget', value: 'meta' }
           )
       )
   )
@@ -224,6 +271,11 @@ export class ServerFeatures {
   #flushTimer: NodeJS.Timeout | undefined
   #lastFlush = 0
   #flushing = false
+  readonly #api: Api
+  readonly #results: ResultSource
+  #statsTimers: NodeJS.Timeout[] = []
+  /** The site's popularity stats are failing: don't ask again before this. */
+  #siteMetaRetryAt = 0
 
   constructor(opts: {
     client: Client
@@ -231,11 +283,15 @@ export class ServerFeatures {
     store: Store
     tracker: Tracker
     predictor: Predictor
+    api: Api
+    results: ResultSource
     label: (id: string) => string
     named: (ids: Iterable<string>) => Promise<void>
   }) {
     this.#client = opts.client
     this.#config = opts.config
+    this.#api = opts.api
+    this.#results = opts.results
     this.#store = opts.store
     this.#tracker = opts.tracker
     this.#predictor = opts.predictor
@@ -252,10 +308,99 @@ export class ServerFeatures {
     this.#lastRender.clear()
     if (this.#store.getSetting(S.rolesChannel)) await this.#postRolesWidget().catch((err) => warn('roles widget', err))
     this.#markDirty()
+    void this.#refreshActivity()
+    void this.#refreshMeta()
+    for (const t of this.#statsTimers) clearInterval(t)
+    this.#statsTimers = [
+      setInterval(() => void this.#refreshActivity(), ACTIVITY_REFRESH_MS),
+      setInterval(() => void this.#refreshMeta(), META_REFRESH_MS),
+    ]
   }
 
   stop() {
     if (this.#flushTimer) clearTimeout(this.#flushTimer)
+    for (const t of this.#statsTimers) clearInterval(t)
+  }
+
+  // ------------------------------------------------------- activity and meta
+
+  /** Ranked activity: matches started (counted live), tracked matches, and when the queue is busiest. */
+  async #refreshActivity() {
+    if (!this.#store.getSetting(S.activityChannel)) return
+    try {
+      const now = Date.now()
+      const tz = this.#config.statsTimeZone
+      const a = activitySummary(this.#store.activitySince(now - 31 * 24 * 3_600_000), now, tz, hourOfDay)
+      const tracked = this.#store.trackedMatchCount()
+      const n = (v: number | null) => (v === null ? '—' : `**${v.toLocaleString('en-US')}**`)
+      const day = (ms: number) => `<t:${Math.floor(ms / 1000)}:D>`
+      const lines = [
+        '**Ranked matches started**',
+        `Last hour: ${n(a.lastHour)} · Last 24h: ${n(a.lastDay)} · Last 7 days: ${n(a.lastWeek)} · Last 30 days: ${n(a.lastMonth)}`,
+        `**Matches tracked with results:** ${tracked.matches.toLocaleString('en-US')}${tracked.since ? ` since ${day(tracked.since)}` : ''}`,
+        a.since
+          ? `-# Counted live by tracklatro since ${day(a.since)}, only while it runs, so longer windows fill in over time.`
+          : '-# Counting starts as soon as the bot is connected to the site.',
+      ]
+      const embed = new EmbedBuilder().setTitle('📈 Ranked activity').setDescription(lines.join('\n')).setColor(C_BLURPLE).setTimestamp()
+      const files: AttachmentBuilder[] = []
+      if (a.perHourOfDay.some((v) => v !== null)) {
+        const png = renderPng(busiestHoursSvg(a.perHourOfDay, hourOfDay(now, tz), tz, Math.max(1, a.days)))
+        files.push(new AttachmentBuilder(png, { name: 'busiest-hours.png' }))
+        embed.setImage('attachment://busiest-hours.png')
+      }
+      await this.#upsert(S.activityChannel, S.activityMessage, { embeds: [embed], files })
+    } catch (err) {
+      warn('activity widget', err)
+    }
+  }
+
+  /**
+   * Deck and stake pick rates this ranked season, as charts. From the site's
+   * popularity stats when they work; otherwise from the ranked matches the bot
+   * knows of itself (and the site isn't asked again for a while).
+   */
+  async #refreshMeta() {
+    if (!this.#store.getSetting(S.metaChannel)) return
+    try {
+      const season = (await this.#results.seasons()).active
+      let source = 'balatromp.com'
+      const picks: Record<'deck' | 'stake', Popularity[]> = { deck: [], stake: [] }
+      let fromSite = false
+      if (Date.now() >= this.#siteMetaRetryAt) {
+        try {
+          picks.deck = await this.#api.fetchPopularity('deck', season, this.#config.queueId)
+          picks.stake = await this.#api.fetchPopularity('stake', season, this.#config.queueId)
+          fromSite = picks.deck.length > 0
+        } catch (err) {
+          warn('site popularity stats (using own data)', err)
+          this.#siteMetaRetryAt = Date.now() + SITE_META_RETRY_MS
+        }
+      }
+      if (!fromSite) {
+        for (const kind of ['deck', 'stake'] as const) {
+          picks[kind] = popularityFromCounts(
+            mergeCounts(this.#store.pickCounts(kind, season).map((c) => ({ name: pickName(c.name), games: c.games })))
+          )
+        }
+        const matches = picks.deck.reduce((sum, p) => sum + p.games, 0)
+        source = `${matches.toLocaleString('en-US')} ranked matches tracklatro knows of (the site's stats are unavailable)`
+      }
+      if (!picks.deck.length && !picks.stake.length) return
+      const embeds: EmbedBuilder[] = []
+      const files: AttachmentBuilder[] = []
+      for (const kind of ['deck', 'stake'] as const) {
+        if (!picks[kind].length) continue
+        const name = `${kind}-picks.png`
+        files.push(new AttachmentBuilder(renderPng(popularitySvg(kind, picks[kind], season)), { name }))
+        embeds.push(new EmbedBuilder().setImage(`attachment://${name}`).setColor(kind === 'deck' ? 0xf5a623 : 0x4aa8ff))
+      }
+      embeds[0]!.setTitle('🃏 Ranked meta').setDescription(`What's picked this season · ${source}`)
+      embeds.at(-1)!.setTimestamp()
+      await this.#upsert(S.metaChannel, S.metaMessage, { embeds, files })
+    } catch (err) {
+      warn('meta widget', err)
+    }
   }
 
   // ------------------------------------------------------------------ widgets
@@ -308,13 +453,19 @@ export class ServerFeatures {
   }
 
   /** Edits the stored message, or posts a new one if there isn't one (or it was deleted). */
-  async #upsert(channelSetting: string, messageSetting: string, payload: { embeds: EmbedBuilder[]; components?: ActionRowBuilder<ButtonBuilder>[] }) {
+  async #upsert(
+    channelSetting: string,
+    messageSetting: string,
+    payload: { embeds: EmbedBuilder[]; components?: ActionRowBuilder<ButtonBuilder>[]; files?: AttachmentBuilder[] }
+  ) {
     const channel = await this.#channel(this.#store.getSetting(channelSetting))
     if (!channel) return
     const messageId = this.#store.getSetting(messageSetting)
     if (messageId) {
       try {
-        await channel.messages.edit(messageId, { ...payload, allowedMentions: { parse: [] } })
+        // With new images, drop the old ones (edits keep attachments unless told otherwise).
+        const attachments = payload.files ? { attachments: [] } : {}
+        await channel.messages.edit(messageId, { ...payload, ...attachments, allowedMentions: { parse: [] } })
         return
       } catch (err) {
         if (!(err instanceof DiscordAPIError && err.code === 10008)) throw err // 10008: unknown message
@@ -550,6 +701,8 @@ export class ServerFeatures {
           `**Win-streak pings:** ${ch(S.streakChannel)} · ${role(S.streakRole)} · ${this.#streakMin()}+ wins`,
           `**Tilt-queue pings:** ${ch(S.tiltChannel)} · ${this.#tiltMin()}+ losses, requeued within ${this.#tiltWindowMs() / 60_000} min`,
           ...(tiltRoles.length ? tiltRoles : ['  · no tilt roles (`/setup tilt-roles add`)']),
+          `**Activity widget:** ${ch(S.activityChannel)}`,
+          `**Meta widget:** ${ch(S.metaChannel)}`,
           `**Polling speed:** ${describeSpeed(this.#config, this.#config.speed)}`,
         ].join('\n')
       )
@@ -561,6 +714,11 @@ export class ServerFeatures {
         await this.#deleteMessage(channelKey(feature), messageKey(feature))
         this.#store.deleteSetting(channelKey(feature))
         this.#lastRender.delete(feature)
+      } else if (feature === 'activity' || feature === 'meta') {
+        const [channelSetting, messageSetting] =
+          feature === 'activity' ? [S.activityChannel, S.activityMessage] : [S.metaChannel, S.metaMessage]
+        await this.#deleteMessage(channelSetting, messageSetting)
+        this.#store.deleteSetting(channelSetting)
       } else if (feature === 'results') {
         this.#store.deleteSetting(S.resultsChannel)
       } else if (feature === 'roles') {
@@ -584,6 +742,18 @@ export class ServerFeatures {
       this.#lastRender.delete(sub)
       await reply(`The ${sub === 'matches' ? 'ongoing matches' : 'queue'} widget will appear in ${channel} in a few seconds.`)
       this.#markDirty()
+      return
+    }
+
+    if (sub === 'activity' || sub === 'meta') {
+      const [channelSetting, messageSetting] = sub === 'activity' ? [S.activityChannel, S.activityMessage] : [S.metaChannel, S.metaMessage]
+      if (!channel.permissionsFor(i.guild.members.me!)?.has(PermissionFlagsBits.AttachFiles)) {
+        return reply(`I also need **Attach Files** in ${channel} for the charts.`)
+      }
+      await this.#deleteMessage(channelSetting, messageSetting)
+      this.#store.setSetting(channelSetting, channel.id)
+      await reply(`The ${sub} widget will appear in ${channel} shortly.`)
+      void (sub === 'activity' ? this.#refreshActivity() : this.#refreshMeta())
       return
     }
 

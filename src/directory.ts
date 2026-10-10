@@ -3,6 +3,12 @@ import type { Tracker } from './tracker.ts'
 
 export type PlayerInfo = { name: string; mmr: number | null; rank: number | null; streak: number | null }
 
+export type SearchHit = { id: string; name: string; mmr: number }
+
+/** The site's search returns at most this many players. */
+const SEARCH_PAGE = 10
+const SEARCH_TTL_MS = 10 * 60_000
+
 /** Ranked data moves; names barely do. */
 const RANKED_TTL_MS = 30 * 60_000
 const UNRANKED_TTL_MS = 6 * 3_600_000
@@ -22,6 +28,7 @@ export class Directory {
   readonly #queueId: string
   readonly #cache = new Map<string, { info: PlayerInfo | null; at: number }>()
   readonly #inflight = new Map<string, Promise<void>>()
+  readonly #searches = new Map<string, { hits: SearchHit[]; at: number }>()
   /** Set by the bot once the Discord client exists. */
   discordName: ((id: string) => Promise<string | undefined>) | undefined
 
@@ -34,6 +41,29 @@ export class Directory {
       const unnamed = [...this.#tracker.players.values()].filter((p) => p.name === undefined).map((p) => p.id)
       if (unnamed.length) void this.ensure(unnamed)
     })
+  }
+
+  /**
+   * Ranked players matching a name, via the site's own search (top 10). For
+   * autocomplete, so it's frugal: results are cached, and a longer query that
+   * extends a cached one with a complete result list (< 10) is filtered locally.
+   */
+  async search(query: string): Promise<SearchHit[]> {
+    const q = query.trim().toLowerCase()
+    if (q.length < 2) return []
+    const now = Date.now()
+    const cached = this.#searches.get(q)
+    if (cached && now - cached.at < SEARCH_TTL_MS) return cached.hits
+    for (let len = q.length - 1; len >= 2; len--) {
+      const prefix = this.#searches.get(q.slice(0, len))
+      if (prefix && now - prefix.at < SEARCH_TTL_MS && prefix.hits.length < SEARCH_PAGE) {
+        return prefix.hits.filter((h) => h.name.toLowerCase().includes(q) || h.id.startsWith(q))
+      }
+    }
+    const hits = await this.#api.searchPlayers(q)
+    this.#searches.set(q, { hits, at: now })
+    if (this.#searches.size > 500) this.#searches.delete(this.#searches.keys().next().value!)
+    return hits
   }
 
   /** Cached info, if any (null = looked up, unknown everywhere). */

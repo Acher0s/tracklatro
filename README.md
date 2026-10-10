@@ -11,8 +11,8 @@ Requires **Node.js 24+** (it runs the TypeScript directly and uses the built-in 
 1. Create an application at <https://discord.com/developers/applications>, add a bot, and copy its token.
    No privileged intents are needed.
 2. Invite it with the `bot` + `applications.commands` scopes and the **View Channels**, **Send
-   Messages**, **Embed Links** and **Manage Roles** permissions:
-   `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=268454912`.
+   Messages**, **Embed Links**, **Attach Files** and **Manage Roles** permissions:
+   `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=268487680`.
    Optionally enable **User Install** so people can use the commands from their DMs without sharing a
    server with the bot.
 3. Configure and run:
@@ -39,6 +39,7 @@ the top players.
 | `/matchup player` | How long until you could queue into them, and who they'd likely get instead |
 | `/recent [player]` | Recently tracked matches with results |
 | `/stats player [public]` | Ranked stats over all seasons (see below) |
+| `/rivals player [public]` | Nemeses (most MMR lost to), favourite victims (most MMR won from), most played opponents |
 | `/timezone [zone]` | Your time zone for `/stats` (suggestions show each zone's current time) |
 | `/about` | What's tracked and how many requests the bot has made |
 | `/setup …` | Server channels: widgets, results, role picker, win-streak pings (see below) |
@@ -46,12 +47,34 @@ the top players.
 If someone queues and gets matched between two polls, people subscribed only to **queue** still get
 the "match found" message, because from their point of view that player did queue.
 
+## Live updates
+
+On top of polling, the bot keeps two kinds of push streams open to the site (the same ones its own
+pages use):
+
+- **Followed players** (`LIVE_STREAMS`, the 50 most followed by default) each get a stream of their
+  state, so subscribers' queue and match DMs go out the moment the site knows, at any speed setting.
+- **One "something happened" stream** fires whenever a match starts or ends anywhere. The bot then polls
+  right away, but never closer together than the speed setting's interval, so it speeds up detection
+  without raising the request rate. Its counts are reused for the forecasts, and rises in the running
+  match count are counted as ranked matches started per hour for the activity widget.
+
+Queue joins of players nobody follows still rely on polling, since the trigger doesn't fire for those.
+Streams reconnect by themselves, and reconnect if they go silent for 10 minutes.
+
+**Player search:** `/stats`, `/subscribe` and the other player options autocomplete any ranked player
+through the site's own search, not just tracked ones. Results are cached, and a longer query reuses a
+complete shorter one.
+
 ## Stats (`/stats`)
 
 `/stats player` shows a player's **standard ranked** games over **all seasons**. Other modes
 (legacy, smallworld, casual, …) aren't counted.
 
+- **Season standing:** rank of total and **top X%** this season.
 - **Record and win rate.**
+- **Nemesis and favourite victim:** the opponent they lost the most MMR to and the one they won the
+  most from (3+ games against them). `/rivals` shows the top 5 of each, plus most played opponents.
 - **Average game length.** The site's history has no game length, so this only covers ranked games
   the bot watched from start to end, and says how many.
 - **MMR per game by time of day,** as a chart image: gains in green and losses in red, the current
@@ -92,6 +115,8 @@ DMs and the live feed, and saved in the database:
 | `/setup streak #channel [min_streak]` | Pings the streak role when someone on a 5+ (or `min_streak`) win streak queues |
 | `/setup tilt #channel [min_losses] [window_minutes]` | Pings tilt roles when someone loses 2+ games back to back, requeuing within 10 min each time |
 | `/setup tilt-roles add @role [min_mmr] [max_mmr]` · `remove @role` | A tilt role for an MMR range (leave out either end for an open range: `min_mmr:1200` = 1200+) |
+| `/setup activity #channel` | Ranked activity: matches started in the last hour/day/week/month, and a chart of when the queue is busiest |
+| `/setup meta #channel` | Charts of the most picked decks and stakes this ranked season |
 | `/setup speed <eco\|normal\|fast>` | How often to poll (see below) |
 | `/setup disable <feature>` · `/setup show` | Turn a feature off · see what's set up |
 
@@ -115,6 +140,14 @@ DMs and the live feed, and saved in the database:
 - **The role** must be below the bot's own role, and **mentionable** (or give the bot **Mention
   Everyone**) for pings to notify people. `/setup` warns about both.
 - Like the feed, results and widgets cover the tracked players: the top `TOP_N` plus anyone followed.
+- **Activity widget:** ranked matches started, counted live from the trigger stream (exact, ranked only,
+  no extra requests) since the bot started counting, plus a busiest-hours chart in `STATS_TIMEZONE`.
+  Hours the bot wasn't running aren't counted as quiet. The site's own `history.games_per_hour` would
+  be the obvious source, but it counts every mode and currently fails (`500: Botlatro API error`).
+- **Meta widget:** deck and stake pick-rate charts with their card art and stake chips, from the site's
+  `stats.deck_popularity` / `stake_popularity` (ranked, current season). Those currently fail on the
+  site too, so it falls back to the ranked matches the bot knows of this season and says so. It tries
+  the site again every 6 hours.
 - **Speed** applies right away and is kept across restarts:
 
   | Speed | Active / idle players polled every | Queue noticed after | Site requests/h (busy / quiet) |
@@ -282,5 +315,7 @@ npm run dev       # restart on file changes
 | `src/server.ts` | `/setup`: widgets, results channel, role picker, win-streak pings |
 | `src/stats.ts` | `/stats`: stored ranked games, history sync, stats, MMR by time of day |
 | `src/charts.ts` | Chart images (SVG → PNG) |
+| `src/streams.ts` | Push streams from the site (tRPC subscriptions over server-sent events) |
+| `src/live.ts` | Live updates: per-player streams, the "something happened" trigger, activity counting |
 | `src/widgets.ts` | Widget and alert content (pure, tested) |
 | `src/queue-posts.ts` | 🟢/🟡/⚪ coloring of "queued" posts |

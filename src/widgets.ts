@@ -80,6 +80,66 @@ export function rolesWidget(alerts: RoleAlerts): WidgetContent {
   return { title: '🔔 Notification roles', description: lines.join('\n'), footer: 'Click again to remove the role' }
 }
 
+// ------------------------------------------------------------------ activity
+
+const HOUR_MS = 3_600_000
+
+export type ActivitySummary = {
+  /** Ranked matches started in each window of complete hours (null: the bot wasn't listening at all then). */
+  lastHour: number | null
+  lastDay: number | null
+  lastWeek: number | null
+  lastMonth: number | null
+  /** Average matches started per hour of the day (in `timeZone`) over watched hours; null where never watched. */
+  perHourOfDay: Array<number | null>
+  /** Days of watched hours behind the averages. */
+  days: number
+  /** First hour the bot counted. */
+  since: number | null
+}
+
+/**
+ * Summarises ranked matches started per hour (counted live, see live.ts).
+ * Only hours the bot was listening exist as rows, so downtime doesn't count
+ * as quiet hours.
+ */
+export function activitySummary(
+  rows: Array<{ hour_start: number; started: number }>,
+  now: number,
+  timeZone: string,
+  hourOfDay: (ms: number, timeZone: string) => number,
+  windowDays = 28
+): ActivitySummary {
+  const currentHour = Math.floor(now / HOUR_MS) * HOUR_MS
+  const sumSince = (hours: number) => {
+    const from = currentHour - hours * HOUR_MS
+    const inWindow = rows.filter((r) => r.hour_start >= from && r.hour_start < currentHour)
+    return inWindow.length ? inWindow.reduce((sum, r) => sum + r.started, 0) : null
+  }
+  const recent = rows.filter((r) => r.hour_start >= currentHour - windowDays * 24 * HOUR_MS && r.hour_start < currentHour)
+  const totals = Array.from({ length: 24 }, () => ({ started: 0, hours: 0 }))
+  for (const r of recent) {
+    const t = totals[hourOfDay(r.hour_start, timeZone)]!
+    t.started += r.started
+    t.hours++
+  }
+  return {
+    lastHour: sumSince(1),
+    lastDay: sumSince(24),
+    lastWeek: sumSince(24 * 7),
+    lastMonth: sumSince(24 * 30),
+    perHourOfDay: totals.map((t) => (t.hours ? t.started / t.hours : null)),
+    days: Math.round(recent.length / 24),
+    since: rows[0]?.hour_start ?? null,
+  }
+}
+
+/** Pick rates from counts (e.g. from the bot's own known matches). */
+export function popularityFromCounts(counts: Array<{ name: string; games: number }>): Array<{ name: string; games: number; pickRate: number }> {
+  const total = counts.reduce((sum, c) => sum + c.games, 0)
+  return counts.map((c) => ({ ...c, pickRate: total ? Math.round((c.games / total) * 1000) / 10 : 0 }))
+}
+
 /** Win-streak ping text. */
 export function streakAlert(label: string, streak: number, roleId: string): string {
   return `🔥 ${label} is on a **${streak}-win streak** and just queued! <@&${roleId}>`

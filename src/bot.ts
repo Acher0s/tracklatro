@@ -26,14 +26,18 @@ import { formatDuration } from './matchmaking.ts'
 import type { Directory } from './directory.ts'
 import { Emojis } from './emoji.ts'
 import { QUEUE_STAGE_EMOJI, QueuePosts } from './queue-posts.ts'
+import type { ResultSource } from './results.ts'
 import { SETUP_COMMAND, ServerFeatures } from './server.ts'
 import { mmrByHourSvg, renderPng } from './charts.ts'
-import { hourOfDay, type StatsService, statsText } from './stats.ts'
+import { hourOfDay, type Rival, rivalsText, type StatsService, statsText } from './stats.ts'
 import { isValidTimeZone, localTime, quickPickZones, suggestTimeZones } from './timezones.ts'
 import type { Forecast, Predictor, ViewerForecast } from './predict.ts'
 import type { MatchOutcome, Player, TrackedMatch, Tracker } from './tracker.ts'
 
 const ts = (ms: number, style: 'R' | 't' | 'f' = 'R') => `<t:${Math.floor(ms / 1000)}:${style}>`
+
+/** How long autocomplete waits for the site's player search. */
+const AUTOCOMPLETE_SEARCH_MS = 1_500
 
 /** Custom id of the "what time is it for you?" picker under /stats (`…:<player id>`). */
 const TZ_PICKER = 'tracklatro:tz'
@@ -90,6 +94,9 @@ const COMMANDS = [
   command('stats', "A player's ranked stats over all seasons")
     .addStringOption(playerOption('Player to look up'))
     .addBooleanOption((o) => o.setName('public').setDescription('Post it for everyone in the channel (default: only you)')),
+  command('rivals', "A player's nemeses, favourite victims and most played opponents (ranked, all seasons)")
+    .addStringOption(playerOption('Player to look up'))
+    .addBooleanOption((o) => o.setName('public').setDescription('Post it for everyone in the channel (default: only you)')),
   command('about', 'How tracklatro works and what it is tracking'),
   SETUP_COMMAND,
 ]
@@ -118,6 +125,7 @@ export class Bot {
     predictor: Predictor
     directory: Directory
     stats: StatsService
+    results: ResultSource
   }) {
     this.#cfg = opts.config
     this.#store = opts.store
@@ -132,6 +140,8 @@ export class Bot {
     this.#server = new ServerFeatures({
       client: this.client,
       config: this.#cfg,
+      api: opts.api,
+      results: opts.results,
       store: this.#store,
       tracker: this.#tracker,
       predictor: this.#predictor,
@@ -462,6 +472,19 @@ export class Bot {
         const rank = this.#player(id)?.rank
         return { name: `${this.#name(id)}${rank !== undefined ? ` (#${rank})` : ''}`.slice(0, 100), value: id }
       })
+    // Anyone else on the ranked leaderboard, via the site's search (bounded so
+    // autocomplete answers within Discord's 3 s even if the site is slow).
+    if (i.commandName !== 'unsubscribe' && q.trim().length >= 2 && choices.length < 25) {
+      const hits = await Promise.race([
+        this.#directory.search(q).catch(() => []),
+        new Promise<[]>((resolve) => setTimeout(() => resolve([]), AUTOCOMPLETE_SEARCH_MS)),
+      ])
+      const seen = new Set(choices.map((c) => c.value))
+      for (const hit of hits) {
+        if (seen.has(hit.id) || choices.length >= 25) continue
+        choices.push({ name: `${hit.name} (${Math.round(hit.mmr)} MMR)`.slice(0, 100), value: hit.id })
+      }
+    }
     await i.respond(choices)
   }
 
@@ -606,38 +629,24 @@ export class Bot {
         return reply(`Time zone set to **${zone}** (now ${localTime(zone)}). /stats will show times of day in it.`)
       }
 
-      case 'stats': {
+      case 'stats':
+      case 'rivals': {
         const id = this.#resolvePlayer(i.options.getString('player', true))
         if (!id) return reply('Unknown player. Pick a suggestion or paste a user ID.')
         const isPublic = i.options.getBoolean('public') ?? false
         await i.deferReply(isPublic ? {} : { flags: MessageFlags.Ephemeral })
-        await this.#named([id])
-        const label = this.#label(id)
-        const firstTime = this.#stats.needsBackfill(id)
-        if (firstTime) {
-          await i.editReply({
-            content: `⏳ Fetching ${label}'s ranked history from all seasons. First time only, this can take a bit…`,
-            allowedMentions: { parse: [] },
-          })
+        const note = await this.#syncHistory(i, id)
+        if (i.commandName === 'stats') {
+          return i.editReply({ content: '', ...(await this.#statsMessage(id, i.user.id, i.locale, note)) })
         }
-        let lastProgress = Date.now()
-        let note = ''
-        try {
-          await this.#stats.sync(id, (p) => {
-            if (!firstTime || Date.now() - lastProgress < 2_500) return
-            lastProgress = Date.now()
-            void i
-              .editReply({
-                content: `⏳ Fetching ${label}'s ranked history… season ${p.seasonIndex}/${p.seasons}, page ${p.page}/${p.pages}`,
-                allowedMentions: { parse: [] },
-              })
-              .catch(() => {})
-          })
-        } catch (err) {
-          console.warn('[stats] history sync failed:', err)
-          note = "\n-# ⚠️ Couldn't reach the site's match history just now; these stats may be incomplete."
-        }
-        return i.editReply({ content: '', ...(await this.#statsMessage(id, i.user.id, i.locale, note)) })
+        const rivals = this.#stats.rivals(id)
+        const embed = new EmbedBuilder()
+          .setTitle(`⚔️ ${this.#name(id)} · rivals`)
+          .setURL(`${this.#cfg.siteUrl}/players/${id}`)
+          .setDescription(`${rivalsText(rivals, (r) => this.#rivalLabel(r))}${note}`)
+          .setFooter({ text: 'Ranked · all seasons · nemeses and victims need 3+ games against them' })
+          .setColor(0xed4245)
+        return i.editReply({ content: '', embeds: [embed], allowedMentions: { parse: [] } })
       }
 
       case 'about': {
@@ -663,6 +672,56 @@ export class Bot {
   }
 
   /**
+   * Brings a player's stored ranked history up to date (the first time it
+   * fetches everything and says so). Returns a note for the reply if the site
+   * couldn't be reached.
+   */
+  async #syncHistory(i: ChatInputCommandInteraction, id: string): Promise<string> {
+    await this.#named([id])
+    const label = this.#label(id)
+    const firstTime = this.#stats.needsBackfill(id)
+    if (firstTime) {
+      await i.editReply({
+        content: `⏳ Fetching ${label}'s ranked history from all seasons. First time only, this can take a bit…`,
+        allowedMentions: { parse: [] },
+      })
+    }
+    let lastProgress = Date.now()
+    try {
+      await this.#stats.sync(id, (p) => {
+        if (!firstTime || Date.now() - lastProgress < 2_500) return
+        lastProgress = Date.now()
+        void i
+          .editReply({
+            content: `⏳ Fetching ${label}'s ranked history… season ${p.seasonIndex}/${p.seasons}, page ${p.page}/${p.pages}`,
+            allowedMentions: { parse: [] },
+          })
+          .catch(() => {})
+      })
+      return ''
+    } catch (err) {
+      console.warn('[stats] history sync failed:', err)
+      return "\n-# ⚠️ Couldn't reach the site's match history just now; this may be incomplete."
+    }
+  }
+
+  /** A rival linked to their profile: the bot's current name for them if it has one, else the name from their games. */
+  #rivalLabel(r: Rival): string {
+    if (this.#player(r.id)?.name || this.#directory.get(r.id)) return this.#label(r.id)
+    return playerLabel(r.name ?? 'unknown player', `${this.#cfg.siteUrl}/players/${r.id}`)
+  }
+
+  /** Current season rank, total players and MMR, if the player is ranked this season. */
+  #standing(id: string): { rank: number; total: number; mmr?: number } | undefined {
+    const p = this.#player(id)
+    const info = this.#directory.get(id)
+    const rank = p?.rank ?? p?.globalRank ?? info?.rank ?? undefined
+    const total = this.#tracker.leaderboardTotal
+    if (rank === undefined || total === undefined) return undefined
+    return { rank, total, mmr: p?.mmr ?? info?.mmr ?? undefined }
+  }
+
+  /**
    * The /stats embed (+ MMR-by-hour chart image) for a player, with times in
    * the viewer's time zone. Discord doesn't tell bots a user's time zone, so
    * viewers without one get a one-click "what time is it for you?" picker.
@@ -676,6 +735,8 @@ export class Bot {
       stakeEmoji: (stake) => this.#emojis.get('stake', stake),
       viewerRanked,
       isSelf: playerId === viewerId,
+      rivalLabel: (r) => this.#rivalLabel(r),
+      standing: this.#standing(playerId),
     })
     if (!ownZone) note += `\n-# Times are in ${this.#cfg.statsTimeZone}. Pick your time below (or use /timezone) to see them in yours.`
     const embed = new EmbedBuilder()

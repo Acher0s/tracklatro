@@ -84,6 +84,8 @@ export function loadConfig() {
 
     dbPath: str('DB_PATH', './data/tracklatro.db'),
     maxSubscriptionsPerUser: num('MAX_SUBSCRIPTIONS_PER_USER', 25, 1),
+    /** Followed players that get a live push stream (most followed first); 0 turns live streams off. */
+    liveStreams: num('LIVE_STREAMS', 50, 0),
   }
 }
 

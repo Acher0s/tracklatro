@@ -115,6 +115,11 @@ export class Predictor {
    * Queued players / running matches in the tracked queue, including players
    * we can't see. Cached: callers say how old a value they accept.
    */
+  /** Fresh counts from elsewhere (the live trigger stream carries them): saves a request. */
+  noteQueueCounts(counts: Map<string, QueueCounts>) {
+    this.#queueCount = { counts: counts.get(this.#cfg.queueId), at: Date.now() }
+  }
+
   async queueCounts(maxAgeMs = QUEUE_COUNT_CACHE_MS): Promise<QueueCounts | undefined> {
     const now = Date.now()
     if (now - this.#queueCount.at > maxAgeMs) {

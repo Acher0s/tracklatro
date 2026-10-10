@@ -3,6 +3,7 @@ import { Bot } from './bot.ts'
 import { loadConfig } from './config.ts'
 import { Store } from './db.ts'
 import { Directory } from './directory.ts'
+import { LiveFeed } from './live.ts'
 import { Predictor } from './predict.ts'
 import { ResultSource } from './results.ts'
 import { applySpeed, isSpeed } from './speed.ts'
@@ -45,7 +46,7 @@ const tracker = new Tracker({
 const directory = new Directory({ api, tracker, queueId: config.queueId })
 const predictor = new Predictor({ api, config, store, tracker, directory })
 const stats = new StatsService({ api, store, results, tracker })
-const bot = new Bot({ config, store, tracker, api, predictor, directory, stats })
+const bot = new Bot({ config, store, tracker, api, predictor, directory, stats, results })
 
 tracker.on('queue_join', (e) => console.log(`[event] queue_join ${e.playerId}`))
 tracker.on('queue_leave', (e) => console.log(`[event] queue_leave ${e.playerId}`))
@@ -54,11 +55,15 @@ tracker.on('match_result', (m, o) =>
   console.log(`[event] match_result ${m.players.join(' vs ')} → ${o.status === 'found' ? `#${o.result.matchId} (${o.result.deck ?? '?'}, ${o.result.stake ?? '?'})` : o.status}`)
 )
 
+const live = new LiveFeed({ api, store, tracker, predictor, maxPlayers: config.liveStreams, queueId: config.queueId })
+
 await bot.start()
 await tracker.start()
+live.start()
 
 const shutdown = () => {
   console.log('shutting down')
+  live.stop()
   tracker.stop()
   void bot.client.destroy()
   store.close()

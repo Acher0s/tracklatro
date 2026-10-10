@@ -122,6 +122,8 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   readonly activeMatches = new Set<TrackedMatch>()
   lastLeaderboardAt = 0
   lastPollAt = 0
+  /** Players on the season leaderboard (for "top X%"). */
+  leaderboardTotal: number | undefined
   paused = false
 
   readonly #api: Api
@@ -134,6 +136,11 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   /** Matches we ended that the site may still show as running (see TrackedMatch.lingering). */
   readonly #ended = new Set<TrackedMatch>()
   #timers = new Set<NodeJS.Timeout>()
+  #pollTimer: NodeJS.Timeout | undefined
+  #nextPollAt = 0
+  #lastTickAt = 0
+  #ticking = false
+  #forceNext = false
   #pollFailures = 0
   #stopped = false
   #warmTop: number
@@ -174,6 +181,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
     this.#stopped = true
     for (const t of this.#timers) clearTimeout(t)
     this.#timers.clear()
+    if (this.#pollTimer) clearTimeout(this.#pollTimer)
   }
 
   #later(ms: number, fn: () => void) {
@@ -190,6 +198,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   async #leaderboardLoop() {
     try {
       this.applyLeaderboard(await this.#api.fetchLeaderboard(this.#cfg.queueId, this.#cfg.topN), Date.now())
+      this.leaderboardTotal = this.#api.leaderboardTotal
     } catch (err) {
       console.error('[tracker] leaderboard refresh failed:', describe(err))
     }
@@ -255,9 +264,10 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   }
 
   /** Picks who to poll this tick. Exported for tests via the public method. */
-  selectBatch(now: number): string[] {
-    const hotDue = this.#cfg.hotIntervalMs * 0.8 // absorb timer jitter
-    const warmDue = this.#cfg.warmIntervalMs * 0.9
+  /** Who to poll now; `force`: every hot and warm player, due or not (after a trigger). */
+  selectBatch(now: number, force = false): string[] {
+    const hotDue = force ? 0 : this.#cfg.hotIntervalMs * 0.8 // absorb timer jitter
+    const warmDue = force ? 0 : this.#cfg.warmIntervalMs * 0.9
     const due: Player[] = []
     const rest: Player[] = []
     for (const p of this.players.values()) {
@@ -277,18 +287,47 @@ export class Tracker extends EventEmitter<TrackerEvents> {
   // --------------------------------------------------------------------- poll
 
   #pollLoop() {
+    this.#pollTimer = undefined
+    this.#ticking = true
+    this.#lastTickAt = Date.now()
+    const force = this.#forceNext
+    this.#forceNext = false
     let delay = this.#cfg.hotIntervalMs
-    this.#tick()
+    this.#tick(force)
       .catch((err) => {
         this.#pollFailures++
         const backoff = Math.min(MAX_BACKOFF_MS, this.#cfg.hotIntervalMs * 2 ** this.#pollFailures)
         delay = Math.max(backoff, err instanceof HttpError ? (err.retryAfterMs ?? 0) : 0)
         console.error(`[tracker] poll failed (${this.#pollFailures}x), retrying in ${delay / 1000}s:`, describe(err))
       })
-      .finally(() => this.#later(delay, () => this.#pollLoop()))
+      .finally(() => {
+        this.#ticking = false
+        this.#schedulePoll(delay)
+      })
   }
 
-  async #tick() {
+  #schedulePoll(delay: number) {
+    if (this.#stopped) return
+    if (this.#pollTimer) clearTimeout(this.#pollTimer)
+    this.#nextPollAt = Date.now() + delay
+    this.#pollTimer = setTimeout(() => this.#pollLoop(), delay)
+  }
+
+  /**
+   * Something happened (a match started or ended somewhere): poll every hot
+   * and warm player on the next tick, and pull that tick forward, though
+   * never closer to the previous one than the speed setting's hot interval.
+   * So triggers make detection quicker without raising the request rate.
+   */
+  pollSoon() {
+    this.#forceNext = true
+    if (this.#ticking || this.#stopped) return // the forced poll follows this one
+    const at = Math.max(Date.now() + 500, this.#lastTickAt + this.#cfg.hotIntervalMs)
+    if (this.#pollTimer && this.#nextPollAt <= at) return // already due sooner
+    this.#schedulePoll(at - Date.now())
+  }
+
+  async #tick(force = false) {
     const now = Date.now()
     if (!this.#hasConsumers()) {
       if (!this.paused) console.log('[tracker] nobody subscribed and no feed channel: pausing state polling')
@@ -306,7 +345,7 @@ export class Tracker extends EventEmitter<TrackerEvents> {
 
     this.checkTimeouts(now)
 
-    const ids = this.selectBatch(now)
+    const ids = this.selectBatch(now, force)
     if (ids.length === 0) return
     const states = await this.#api.fetchStates(ids)
     this.#pollFailures = 0

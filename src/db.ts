@@ -31,6 +31,8 @@ export type GameRow = {
   stake: string | null
   /** 'season7', … ('' if unknown). Old seasons number their games differently, so ids are per season. */
   season: string
+  /** The opponent's name at the time, from the site's history (null for games only the bot saw). */
+  opponent_name?: string | null
   /** Only for games the bot watched (the site's history has no game length). */
   duration_ms: number | null
 }
@@ -106,6 +108,10 @@ export class Store {
         value   TEXT NOT NULL,
         PRIMARY KEY (user_id, key)
       );
+      CREATE TABLE IF NOT EXISTS activity_hours (
+        hour_start INTEGER PRIMARY KEY,
+        started    INTEGER NOT NULL DEFAULT 0
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -130,6 +136,9 @@ export class Store {
         at      INTEGER NOT NULL
       );
     `)
+    // Columns added after a table first shipped.
+    const gameColumns = (this.#db.prepare('PRAGMA table_info(games)').all() as Array<{ name: string }>).map((c) => c.name)
+    if (!gameColumns.includes('opponent_name')) this.#db.exec('ALTER TABLE games ADD COLUMN opponent_name TEXT')
     for (const s of this.#db.prepare('SELECT * FROM subscriptions').all() as Subscription[]) {
       this.#cache(s.user_id, s.target_id, s.mask)
     }
@@ -154,6 +163,13 @@ export class Store {
 
   isWatched(targetId: string): boolean {
     return this.#byTarget.has(targetId)
+  }
+
+  /** Followed players with their number of subscribers, most followed first. */
+  watchedTargets(): Array<{ id: string; subscribers: number }> {
+    return [...this.#byTarget]
+      .map(([id, subs]) => ({ id, subscribers: subs.size }))
+      .sort((a, b) => b.subscribers - a.subscribers)
   }
 
   hasAnySubscriptions(): boolean {
@@ -255,8 +271,8 @@ export class Store {
    */
   upsertGames(rows: GameRow[]) {
     const stmt = this.#db.prepare(
-      `INSERT INTO games (player_id, match_id, played_at, opponent_id, result, mmr_change, deck, stake, season, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO games (player_id, match_id, played_at, opponent_id, result, mmr_change, deck, stake, season, duration_ms, opponent_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (player_id, season, match_id) DO UPDATE SET
          played_at   = excluded.played_at,
          opponent_id = excluded.opponent_id,
@@ -264,18 +280,24 @@ export class Store {
          mmr_change  = COALESCE(excluded.mmr_change, games.mmr_change),
          deck        = COALESCE(excluded.deck, games.deck),
          stake       = COALESCE(excluded.stake, games.stake),
-         duration_ms = COALESCE(games.duration_ms, excluded.duration_ms)`
+         duration_ms = COALESCE(games.duration_ms, excluded.duration_ms),
+         opponent_name = COALESCE(excluded.opponent_name, games.opponent_name)`
     )
     this.#db.exec('BEGIN')
     try {
       for (const r of rows) {
-        stmt.run(r.player_id, r.match_id, r.played_at, r.opponent_id, r.result, r.mmr_change, r.deck, r.stake, r.season, r.duration_ms)
+        stmt.run(r.player_id, r.match_id, r.played_at, r.opponent_id, r.result, r.mmr_change, r.deck, r.stake, r.season, r.duration_ms, r.opponent_name ?? null)
       }
       this.#db.exec('COMMIT')
     } catch (err) {
       this.#db.exec('ROLLBACK')
       throw err
     }
+  }
+
+  /** Whether this player's stored games include opponent names (games stored before names were kept don't). */
+  hasOpponentNames(playerId: string): boolean {
+    return this.#db.prepare('SELECT 1 FROM games WHERE player_id = ? AND opponent_name IS NOT NULL LIMIT 1').get(playerId) !== undefined
   }
 
   gamesOf(playerId: string): GameRow[] {
@@ -312,6 +334,47 @@ export class Store {
          ON CONFLICT (player_id, season) DO UPDATE SET complete = 1, synced_at = excluded.synced_at`
       )
       .run(playerId, season, syncedAt)
+  }
+
+  // ----------------------------------------------------------------- activity
+
+  /**
+   * Ranked matches started per hour, counted live. An hour row exists for
+   * every hour the bot was listening (even with 0 starts), so averages only
+   * use hours it actually saw.
+   */
+  addActivity(hourStart: number, started: number) {
+    this.#db
+      .prepare(
+        `INSERT INTO activity_hours (hour_start, started) VALUES (?, ?)
+         ON CONFLICT (hour_start) DO UPDATE SET started = started + excluded.started`
+      )
+      .run(hourStart, started)
+  }
+
+  activitySince(since: number): Array<{ hour_start: number; started: number }> {
+    return this.#db
+      .prepare('SELECT hour_start, started FROM activity_hours WHERE hour_start >= ? ORDER BY hour_start')
+      .all(since) as Array<{ hour_start: number; started: number }>
+  }
+
+  /** Matches the bot tracked to a result, and since when. */
+  trackedMatchCount(): { matches: number; since: number | null } {
+    const row = this.#db
+      .prepare('SELECT COUNT(*) AS n, MIN(started_at) AS since FROM matches WHERE winner_id IS NOT NULL')
+      .get() as { n: number; since: number | null }
+    return { matches: row.n, since: row.since }
+  }
+
+  /** Deck or stake per distinct ranked match the bot knows of in a season (games are stored once per player). */
+  pickCounts(kind: 'deck' | 'stake', season: string): Array<{ name: string; games: number }> {
+    return this.#db
+      .prepare(
+        `SELECT ${kind} AS name, COUNT(DISTINCT match_id) AS games FROM games
+         WHERE season = ? AND ${kind} IS NOT NULL GROUP BY ${kind} ORDER BY games DESC, name`
+      )
+      .all(season)
+      .map((r) => ({ name: String(r.name), games: Number(r.games) }))
   }
 
   // ------------------------------------------------------------ user settings

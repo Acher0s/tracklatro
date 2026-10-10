@@ -52,6 +52,9 @@ export type SiteGame = {
 
 export type QueueCounts = { queued: number; running: number }
 
+/** Pick rate of a deck or stake ("yellow", "spectral+": lowercase, without "Deck"/"Stake"). */
+export type Popularity = { name: string; games: number; pickRate: number }
+
 /** A player's standing on the season leaderboard. */
 export type RankInfo = { name: string; mmr: number; rank: number; streak: number }
 
@@ -82,8 +85,10 @@ export class Api {
   readonly #userAgent: string
   #maxUrlLength = MAX_URL_LENGTH
 
-  /** Total HTTP requests made since start. Exposed for /about. */
+  /** Total HTTP requests made since start (streams count once per connection). Exposed for /about. */
   requestCount = 0
+  /** Players on the season leaderboard, as of the last leaderboard fetch (for "top X%"). */
+  leaderboardTotal: number | undefined
 
   constructor(opts: { siteUrl: string; contact?: string }) {
     this.#siteUrl = opts.siteUrl
@@ -166,9 +171,10 @@ export class Api {
       sortBy: 'mmr',
       sortOrder: 'desc',
     })
-    type PageResult = { data: LeaderboardEntry[]; totalPages: number }
+    type PageResult = { data: LeaderboardEntry[]; totalPages: number; total: number }
 
     const first = await this.#trpcOne<ReturnType<typeof page>, PageResult>('leaderboard.get_leaderboard', page(1))
+    this.leaderboardTotal = first.total
     const wantedPages =
       count === 0 ? first.totalPages : Math.min(first.totalPages, Math.ceil(count / LEADERBOARD_PAGE_SIZE))
     const rest = await this.#trpcBatch<ReturnType<typeof page>, PageResult>(
@@ -228,6 +234,58 @@ export class Api {
   }
 
   /** A player's newest games in a season (`season7`, …), newest first. */
+  // ------------------------------------------------------------ live streams
+
+  /**
+   * Opens a tRPC subscription as a server-sent event stream (what the site's
+   * own pages use for live updates). Resolves when the stream ends; the
+   * caller reconnects. See streams.ts.
+   */
+  async openStream(procedure: string, input: unknown, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
+    this.requestCount++
+    const url = `${this.#siteUrl}/api/trpc/${procedure}?input=${encodeURIComponent(JSON.stringify({ json: input }))}`
+    const res = await fetch(url, {
+      headers: { 'User-Agent': this.#userAgent, Accept: 'text/event-stream' },
+      signal,
+    })
+    if (!res.ok || !res.body) throw new HttpError(res.status, `${res.status} ${res.statusText} from stream ${procedure}`)
+    return res.body
+  }
+
+  // ------------------------------------------------------------- site stats
+
+  /** Players matching a name (or Discord id) on the ranked leaderboard: the site's own search box. */
+  async searchPlayers(query: string): Promise<Array<{ id: string; name: string; mmr: number }>> {
+    this.requestCount++
+    const res = await fetch(`${this.#siteUrl}/api/search?query=${encodeURIComponent(query)}`, {
+      headers: { 'User-Agent': this.#userAgent, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (!res.ok) throw new HttpError(res.status, `${res.status} ${res.statusText} from search`)
+    const results = (await res.json()) as Array<{ type: string; discord_id?: string; username?: string; ranked_mmr?: number }>
+    return results
+      .filter((r) => r.type === 'player' && r.discord_id && r.username)
+      .map((r) => ({ id: r.discord_id!, name: r.username!, mmr: r.ranked_mmr ?? 0 }))
+  }
+
+  /**
+   * Games started per hour across the queue bot (all modes; almost all
+   * ranked), whole history. Keys are "YYYY-MM-DD HH:00" in the site server's
+   * time (UTC). Same input as the site's own activity chart, so it's one
+   * shared cache entry the site keeps warm (a date-range input would make it
+   * compute a fresh one).
+   */
+  async fetchGamesPerHour(): Promise<Array<{ timeUnit: string; count: number }>> {
+    return this.#trpcOne<object, Array<{ timeUnit: string; count: number }>>('history.games_per_hour', { groupBy: 'hour' })
+  }
+
+  /** How often each deck / stake is picked in a season's queue (cached on the site). */
+  async fetchPopularity(kind: 'deck' | 'stake', season: string, queueId: string): Promise<Popularity[]> {
+    type Row = { deck?: string; stake?: string; games: number; pickRate: number }
+    const rows = await this.#trpcOne<object, Row[]>(`stats.${kind}_popularity`, { mode: 'season', season, queueId })
+    return rows.map((r) => ({ name: (kind === 'deck' ? r.deck : r.stake) ?? '?', games: r.games, pickRate: r.pickRate }))
+  }
+
   /**
    * A player's entire history, every season and mode, in one request
    * (`history.user_games`: old seasons from the site's database, the rest
